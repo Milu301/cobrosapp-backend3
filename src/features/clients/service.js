@@ -94,11 +94,58 @@ async function getClientById(clientId) {
   return r.rows[0] || null;
 }
 
+/**
+ * ✅ Vendor puede ver un cliente si:
+ * - client.vendor_id == vendorId
+ * - O el cliente está dentro de CUALQUIER ruta asignada a ese vendor (assigned/completed)
+ * - O el vendor tiene al menos 1 crédito de ese cliente (para que no se bloquee después)
+ */
+async function vendorCanAccessClient(adminId, vendorId, clientId) {
+  const r = await query(
+    `
+    SELECT 1
+    WHERE
+      EXISTS (
+        SELECT 1
+        FROM clients c
+        WHERE c.id = $3
+          AND c.admin_id = $1
+          AND c.deleted_at IS NULL
+          AND c.vendor_id = $2
+      )
+      OR EXISTS (
+        SELECT 1
+        FROM route_assignments ra
+        JOIN routes rt ON rt.id = ra.route_id
+        JOIN route_clients rc ON rc.route_id = ra.route_id
+        WHERE ra.admin_id = $1
+          AND ra.vendor_id = $2
+          AND ra.deleted_at IS NULL
+          AND ra.status IN ('assigned','completed')
+          AND rt.deleted_at IS NULL
+          AND rc.deleted_at IS NULL
+          AND rc.is_active = true
+          AND rc.client_id = $3
+      )
+      OR EXISTS (
+        SELECT 1
+        FROM credits cr
+        WHERE cr.admin_id = $1
+          AND cr.vendor_id = $2
+          AND cr.client_id = $3
+          AND cr.deleted_at IS NULL
+      )
+    LIMIT 1
+    `,
+    [adminId, vendorId, clientId]
+  );
+
+  return !!r.rows[0];
+}
+
 // -------------------------------------------------
 // 💳 Créditos del cliente (para pantalla detalle)
 // -------------------------------------------------
-// Devuelve créditos + pagos (si hay) para un clientId.
-// Nota: el filtrado por admin/vendor se hace en el controller.
 async function listClientCredits(clientId) {
   const r = await query(
     `SELECT
@@ -213,6 +260,7 @@ module.exports = {
   listAdminClients,
   listVendorClients,
   getClientById,
+  vendorCanAccessClient,
   listClientCredits,
   assertVendorBelongsToAdmin,
   createClient,

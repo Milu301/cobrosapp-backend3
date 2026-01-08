@@ -46,7 +46,7 @@ const routeClientsReorderSchema = z.object({
 const routeAssignSchema = z.object({
   vendor_id: z.string().uuid(),
   assigned_date: z.string().regex(dateRegex, "Formato inválido (YYYY-MM-DD)"),
-  status: z.enum(["assigned", "completed", "canceled"]).optional().default("assigned"),
+  status: z.enum(["assigned", "completed", "cancelled"]).optional().default("assigned"),
   notes: z.string().max(1000).optional().nullable()
 });
 

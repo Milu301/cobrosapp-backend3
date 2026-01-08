@@ -37,54 +37,21 @@ function permTrue(permissions, key) {
   return v === true || v === "true" || v === 1 || v === "1";
 }
 
-/**
- * ✅ Permite por ruta asignada:
- * - Primero busca una asignación de HOY (assigned_date = CURRENT_DATE)
- * - Si no hay, usa la última asignación (assigned_date desc)
- * - Luego valida si el cliente está en route_clients de esa ruta
- */
 async function vendorHasClientInAssignedRoute(adminId, vendorId, clientId) {
   const r = await query(
     `
-    WITH todays AS (
-      SELECT ra.route_id
-      FROM route_assignments ra
-      JOIN routes rt ON rt.id = ra.route_id
-      WHERE ra.admin_id = $1
-        AND ra.vendor_id = $2
-        AND ra.assigned_date = CURRENT_DATE
-        AND ra.deleted_at IS NULL
-        AND rt.deleted_at IS NULL
-        AND rt.status = 'active'
-        AND ra.status IN ('assigned','completed')
-      ORDER BY ra.created_at DESC
-      LIMIT 1
-    ),
-    latest AS (
-      SELECT ra.route_id
-      FROM route_assignments ra
-      JOIN routes rt ON rt.id = ra.route_id
-      WHERE ra.admin_id = $1
-        AND ra.vendor_id = $2
-        AND ra.deleted_at IS NULL
-        AND rt.deleted_at IS NULL
-        AND rt.status = 'active'
-        AND ra.status IN ('assigned','completed')
-      ORDER BY ra.assigned_date DESC, ra.created_at DESC
-      LIMIT 1
-    ),
-    chosen AS (
-      SELECT route_id FROM todays
-      UNION ALL
-      SELECT route_id FROM latest WHERE NOT EXISTS (SELECT 1 FROM todays)
-      LIMIT 1
-    )
     SELECT 1
-    FROM chosen
-    JOIN route_clients rc ON rc.route_id = chosen.route_id
-    WHERE rc.client_id = $3
+    FROM route_assignments ra
+    JOIN routes rt ON rt.id = ra.route_id
+    JOIN route_clients rc ON rc.route_id = ra.route_id
+    WHERE ra.admin_id = $1
+      AND ra.vendor_id = $2
+      AND ra.deleted_at IS NULL
+      AND ra.status IN ('assigned','completed')
+      AND rt.deleted_at IS NULL
       AND rc.deleted_at IS NULL
       AND rc.is_active = true
+      AND rc.client_id = $3
     LIMIT 1
     `,
     [adminId, vendorId, clientId]
@@ -112,12 +79,12 @@ async function createCredit(auth, clientId, payload) {
 
     vendorId = auth.vendorId;
 
-    // ✅ NUEVO: vendor puede crear si el cliente es suyo O si está en su ruta asignada
-    const okByOwner = clientRow.vendor_id === vendorId;
-    const okByRoute = okByOwner ? true : await vendorHasClientInAssignedRoute(auth.adminId, vendorId, clientId);
-
-    if (!okByRoute) {
-      throw new AppError(403, "FORBIDDEN", "Cliente no asignado a este vendor");
+    // ✅ NUEVO: vendor puede crear crédito si:
+    // - el cliente está asignado directo (client.vendor_id == vendorId)
+    // - O el cliente está en una ruta asignada a este vendor
+    if (clientRow.vendor_id !== vendorId) {
+      const inRoute = await vendorHasClientInAssignedRoute(auth.adminId, vendorId, clientId);
+      if (!inRoute) throw new AppError(403, "FORBIDDEN", "No asignado a este vendor");
     }
   } else {
     // admin puede asignar vendor_id opcionalmente
@@ -134,7 +101,6 @@ async function createCredit(auth, clientId, payload) {
   const interestRate = round2(payload.interest_rate || 0);
   const count = payload.installments_count;
 
-  // ✅ divisa
   const currencyCode = String(payload.currency_code || "COP").toUpperCase();
 
   const total = round2(principal * (1 + interestRate / 100));
@@ -179,7 +145,7 @@ async function createCredit(auth, clientId, payload) {
         payload.start_date,
         total,
         balance,
-        balance, // balance_amount = balance
+        balance,
         currencyCode,
         payload.notes || null
       ]
@@ -187,12 +153,10 @@ async function createCredit(auth, clientId, payload) {
 
     const credit = cr.rows[0];
 
-    // insertar cuotas (por defecto diario: +1 día)
     for (let i = 1; i <= count; i++) {
       let cents = baseCents;
       if (i === count) cents = baseCents + remainder;
       const amountDue = cents / 100;
-
       const dueDate = addDays(payload.start_date, i - 1);
 
       await client.query(
@@ -219,7 +183,7 @@ async function createPayment(auth, creditId, payload) {
   try {
     await client.query("BEGIN");
 
-    // Traemos también client_id para validar ruta por cliente si vendor_id no coincide
+    // ✅ Traemos client_id para validar ruta también
     const cr = await client.query(
       `SELECT id, admin_id, vendor_id, client_id, status,
               balance_amount::float8 AS balance_amount
@@ -238,14 +202,12 @@ async function createPayment(auth, creditId, payload) {
       if (v.admin_id !== auth.adminId) throw new AppError(403, "FORBIDDEN", "Vendor no pertenece a tu admin");
       if (String(v.status || "").toLowerCase() !== "active") throw new AppError(403, "FORBIDDEN", "Vendor inactivo");
 
-      // ✅ NUEVO: vendor puede cobrar si:
-      // - el crédito está asignado a él, o
-      // - el cliente del crédito está en su ruta asignada
-      const okByOwner = credit.vendor_id === auth.vendorId;
-      const okByRoute = okByOwner ? true : await vendorHasClientInAssignedRoute(auth.adminId, auth.vendorId, credit.client_id);
-
-      if (!okByRoute) {
-        throw new AppError(403, "FORBIDDEN", "Crédito no asignado a este vendor");
+      // ✅ NUEVO: vendor puede pagar si:
+      // - el crédito está asignado a él
+      // - O el cliente está en una ruta asignada a él
+      const inRoute = await vendorHasClientInAssignedRoute(auth.adminId, auth.vendorId, credit.client_id);
+      if (credit.vendor_id !== auth.vendorId && !inRoute) {
+        throw new AppError(403, "FORBIDDEN", "No asignado a este vendor");
       }
     }
 
@@ -256,14 +218,10 @@ async function createPayment(auth, creditId, payload) {
     const amount = round2(payload.amount);
     if (amount <= 0) throw new AppError(400, "VALIDATION_ERROR", "Monto inválido");
 
-    // No permitir pagar más de lo que debe (tolerancia centavos)
     const balanceCents = Math.round(Number(credit.balance_amount) * 100);
     const payCents = Math.round(amount * 100);
-    if (payCents > balanceCents) {
-      throw new AppError(400, "VALIDATION_ERROR", "El pago excede el saldo");
-    }
+    if (payCents > balanceCents) throw new AppError(400, "VALIDATION_ERROR", "El pago excede el saldo");
 
-    // insertar payment
     const pr = await client.query(
       `INSERT INTO payments
         (admin_id, credit_id, vendor_id, amount, method, note, paid_at)
@@ -292,7 +250,7 @@ async function createPayment(auth, creditId, payload) {
 
     const payment = pr.rows[0];
 
-    // aplicar pago a cuotas (FIFO)
+    // FIFO a cuotas
     const instRes = await client.query(
       `SELECT id, installment_number, amount_due::float8 AS amount_due, amount_paid::float8 AS amount_paid, status, due_date
        FROM installments
@@ -318,9 +276,7 @@ async function createPayment(auth, creditId, payload) {
 
       const dueDate = new Date(inst.due_date + "T00:00:00.000Z");
       const today = new Date();
-      const isPastDue =
-        dueDate.getTime() <
-        new Date(today.toISOString().slice(0, 10) + "T00:00:00.000Z").getTime();
+      const isPastDue = dueDate.getTime() < new Date(today.toISOString().slice(0, 10) + "T00:00:00.000Z").getTime();
 
       const newStatus = fullyPaid ? (isPastDue ? "paid_late" : "paid") : isPastDue ? "late" : "pending";
 
@@ -336,7 +292,6 @@ async function createPayment(auth, creditId, payload) {
       remainingCents -= payToThis;
     }
 
-    // recalcular balance del crédito
     const newBalance = round2(Number(credit.balance_amount) - amount);
     const finalBalance = newBalance < 0 ? 0 : newBalance;
     const paidOff = Math.round(finalBalance * 100) <= 0;
