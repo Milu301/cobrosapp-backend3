@@ -79,4 +79,8 @@ const authLimiter = rateLimit({
   }
 });
 
-module.exports = { generalLimiter, authLimiter };
+// Backwards-compatible alias used by src/routes/index.js
+const apiLimiter = generalLimiter;
+
+module.exports = { apiLimiter, generalLimiter, authLimiter };
+
