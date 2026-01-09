@@ -29,7 +29,7 @@ async function getOne(req, res) {
   if (client.admin_id !== req.auth.adminId) throw new AppError(403, "FORBIDDEN", "Cliente no pertenece a tu admin");
 
   if (req.auth.role === "vendor") {
-    // ✅ ahora permite si está en ruta asignada o tiene créditos del vendor (según tu service.vendorCanAccessClient)
+    // ✅ Ahora: también deja si está en una ruta asignada o si tiene créditos del vendor
     const can = await service.vendorCanAccessClient(req.auth.adminId, req.auth.vendorId, clientId);
     if (!can) throw new AppError(403, "FORBIDDEN", "No asignado a este vendor");
   }

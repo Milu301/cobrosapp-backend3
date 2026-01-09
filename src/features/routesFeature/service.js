@@ -409,6 +409,12 @@ async function createRouteVisit(adminId, vendorId, payload) {
 
   return ins.rows[0];
 }
+async function getRouteClientsAdmin(adminId, routeId) {
+  const route = await getRouteById(routeId);
+  if (!route || route.deleted_at) return null;
+  if (route.admin_id !== adminId) return null;
+  return listRouteClients(routeId);
+}
 
 module.exports = {
   listRoutes,

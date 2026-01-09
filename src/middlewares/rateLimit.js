@@ -1,54 +1,82 @@
 ﻿const rateLimit = require("express-rate-limit");
 
-// ✅ Robust: soporta env exportado como { env } o export directo
-const envModule = require("../config/env");
-const env = (envModule && envModule.env) ? envModule.env : (envModule || {});
+// ✅ Este middleware NO debe tumbar el server si faltan env vars.
+// Soporta:
+//   - config/env.js exportando { env }
+//   - config/env.js exportando el objeto env directo
+let env = {};
+try {
+  const envMod = require("../config/env");
+  env = envMod?.env || envMod || {};
+} catch {
+  env = {};
+}
 
-// ✅ Defaults para que NO crashee si Railway no tiene variables
-const RATE_LIMIT_ENABLED = String(env.RATE_LIMIT_ENABLED ?? process.env.RATE_LIMIT_ENABLED ?? "true").toLowerCase() !== "false";
+function toPositiveInt(value, fallback) {
+  const n = Number(value);
+  return Number.isFinite(n) && n > 0 ? Math.floor(n) : fallback;
+}
 
-// 15 min por defecto
-const RATE_LIMIT_WINDOW_MS = Number(env.RATE_LIMIT_WINDOW_MS ?? process.env.RATE_LIMIT_WINDOW_MS ?? (15 * 60 * 1000));
+const DISABLED =
+  String(process.env.RATE_LIMIT_DISABLED || "").toLowerCase() === "true";
 
-// ✅ Subimos defaults para que NO te tire 429 por la app (la app hace muchas llamadas)
-const RATE_LIMIT_MAX = Number(env.RATE_LIMIT_MAX ?? process.env.RATE_LIMIT_MAX ?? 2000);
-const RATE_LIMIT_AUTH_MAX = Number(env.RATE_LIMIT_AUTH_MAX ?? process.env.RATE_LIMIT_AUTH_MAX ?? 300);
+const RATE_LIMIT_WINDOW_MS = toPositiveInt(
+  process.env.RATE_LIMIT_WINDOW_MS ?? env.RATE_LIMIT_WINDOW_MS,
+  15 * 60 * 1000
+);
 
-// fallback si el valor viene NaN
-const windowMs = Number.isFinite(RATE_LIMIT_WINDOW_MS) ? RATE_LIMIT_WINDOW_MS : (15 * 60 * 1000);
-const max = Number.isFinite(RATE_LIMIT_MAX) ? RATE_LIMIT_MAX : 2000;
-const authMax = Number.isFinite(RATE_LIMIT_AUTH_MAX) ? RATE_LIMIT_AUTH_MAX : 300;
+// 🔥 Default más alto para producción móvil (evita 429 por refrescos)
+const RATE_LIMIT_MAX = toPositiveInt(
+  process.env.RATE_LIMIT_MAX ?? env.RATE_LIMIT_MAX,
+  1000
+);
 
-function json429(_req, res) {
-  return res.status(429).json({
+const RATE_LIMIT_AUTH_WINDOW_MS = toPositiveInt(
+  process.env.RATE_LIMIT_AUTH_WINDOW_MS ?? env.RATE_LIMIT_AUTH_WINDOW_MS,
+  15 * 60 * 1000
+);
+
+const RATE_LIMIT_AUTH_MAX = toPositiveInt(
+  process.env.RATE_LIMIT_AUTH_MAX ?? env.RATE_LIMIT_AUTH_MAX,
+  200
+);
+
+// ✅ NO limitar endpoint que se llama muy seguido (ej: ubicación /location)
+function shouldSkip(req) {
+  if (DISABLED) return true;
+
+  // req.path cuando estás montado en /api -> "/vendors/:id/location"
+  const p = req.path || "";
+  if (req.method === "POST" && /\/vendors\/[^/]+\/location$/.test(p)) return true;
+
+  // opcional: health/ping
+  if (req.method === "GET" && (p === "/health" || p === "/ping")) return true;
+
+  return false;
+}
+
+const generalLimiter = rateLimit({
+  windowMs: RATE_LIMIT_WINDOW_MS,
+  max: RATE_LIMIT_MAX,
+  standardHeaders: true,
+  legacyHeaders: false,
+  skip: shouldSkip,
+  message: {
     ok: false,
-    error: { code: "TOO_MANY_REQUESTS", message: "Too many requests, please try again later." }
-  });
-}
+    error: { code: "RATE_LIMIT", message: "Too many requests, please try again later." }
+  }
+});
 
-// ✅ si deshabilitas RATE_LIMIT_ENABLED=false, no limita nada
-function noop(_req, _res, next) {
-  return next();
-}
+const authLimiter = rateLimit({
+  windowMs: RATE_LIMIT_AUTH_WINDOW_MS,
+  max: RATE_LIMIT_AUTH_MAX,
+  standardHeaders: true,
+  legacyHeaders: false,
+  skip: () => DISABLED,
+  message: {
+    ok: false,
+    error: { code: "AUTH_RATE_LIMIT", message: "Too many login attempts, try again later." }
+  }
+});
 
-const apiLimiter = RATE_LIMIT_ENABLED
-  ? rateLimit({
-      windowMs,
-      max,
-      standardHeaders: true,
-      legacyHeaders: false,
-      handler: (req, res) => json429(req, res)
-    })
-  : noop;
-
-const authLimiter = RATE_LIMIT_ENABLED
-  ? rateLimit({
-      windowMs,
-      max: authMax,
-      standardHeaders: true,
-      legacyHeaders: false,
-      handler: (req, res) => json429(req, res)
-    })
-  : noop;
-
-module.exports = { apiLimiter, authLimiter };
+module.exports = { generalLimiter, authLimiter };

@@ -65,6 +65,11 @@ async function createCredit(auth, clientId, payload) {
   if (!clientRow || clientRow.deleted_at) throw new AppError(404, "NOT_FOUND", "Cliente no encontrado");
   if (clientRow.admin_id !== auth.adminId) throw new AppError(403, "FORBIDDEN", "Cliente no pertenece a tu admin");
 
+  if (!payload?.start_date) throw new AppError(400, "VALIDATION_ERROR", "start_date requerido");
+  if (!payload?.installments_count || Number(payload.installments_count) <= 0) {
+    throw new AppError(400, "VALIDATION_ERROR", "installments_count inválido");
+  }
+
   // Resolver vendor_id
   let vendorId = null;
 
@@ -98,8 +103,10 @@ async function createCredit(auth, clientId, payload) {
   }
 
   const principal = round2(payload.principal_amount);
+  if (principal <= 0) throw new AppError(400, "VALIDATION_ERROR", "principal_amount inválido");
+
   const interestRate = round2(payload.interest_rate || 0);
-  const count = payload.installments_count;
+  const count = Number(payload.installments_count);
 
   const currencyCode = String(payload.currency_code || "COP").toUpperCase();
 
@@ -179,7 +186,7 @@ async function createCredit(auth, clientId, payload) {
        SELECT $1,'expense','credit_disbursement',$2,$3::timestamptz,'credit',$4,$5
        WHERE NOT EXISTS (
          SELECT 1 FROM admin_cash_movements
-         WHERE admin_id=$1 AND reference_type='credit' AND reference_id=$4
+         WHERE admin_id=$1 AND reference_type='credit' AND reference_id=$4 AND deleted_at IS NULL
        )`,
       [auth.adminId, principal, occurredAt, credit.id, note]
     );
@@ -192,7 +199,7 @@ async function createCredit(auth, clientId, payload) {
          SELECT $1,$2,'expense','credit_disbursement',$3,$4::timestamptz,'credit',$5,$6
          WHERE NOT EXISTS (
            SELECT 1 FROM vendor_cash_movements
-           WHERE admin_id=$1 AND vendor_id=$2 AND reference_type='credit' AND reference_id=$5
+           WHERE admin_id=$1 AND vendor_id=$2 AND reference_type='credit' AND reference_id=$5 AND deleted_at IS NULL
          )`,
         [auth.adminId, vendorId, principal, occurredAt, credit.id, note]
       );
@@ -291,7 +298,7 @@ async function createPayment(auth, creditId, payload) {
        SELECT $1,'income','payment',$2,$3::timestamptz,'payment',$4,$5
        WHERE NOT EXISTS (
          SELECT 1 FROM admin_cash_movements
-         WHERE admin_id=$1 AND reference_type='payment' AND reference_id=$4
+         WHERE admin_id=$1 AND reference_type='payment' AND reference_id=$4 AND deleted_at IS NULL
        )`,
       [auth.adminId, amount, payAt, payment.id, notePay]
     );
@@ -310,7 +317,7 @@ async function createPayment(auth, creditId, payload) {
          SELECT $1,$2,'income','payment',$3,$4::timestamptz,'payment',$5,$6
          WHERE NOT EXISTS (
            SELECT 1 FROM vendor_cash_movements
-           WHERE admin_id=$1 AND vendor_id=$2 AND reference_type='payment' AND reference_id=$5
+           WHERE admin_id=$1 AND vendor_id=$2 AND reference_type='payment' AND reference_id=$5 AND deleted_at IS NULL
          )`,
         [auth.adminId, vendorCashVendorId, amount, payAt, payment.id, notePayVendor]
       );
@@ -342,7 +349,9 @@ async function createPayment(auth, creditId, payload) {
 
       const dueDate = new Date(inst.due_date + "T00:00:00.000Z");
       const today = new Date();
-      const isPastDue = dueDate.getTime() < new Date(today.toISOString().slice(0, 10) + "T00:00:00.000Z").getTime();
+      const isPastDue =
+        dueDate.getTime() <
+        new Date(today.toISOString().slice(0, 10) + "T00:00:00.000Z").getTime();
 
       const newStatus = fullyPaid ? (isPastDue ? "paid_late" : "paid") : isPastDue ? "late" : "pending";
 
