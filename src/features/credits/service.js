@@ -8,7 +8,7 @@ function round2(n) {
 function addDays(dateStr, days) {
   const d = new Date(dateStr + "T00:00:00.000Z");
   d.setUTCDate(d.getUTCDate() + days);
-  return d.toISOString().slice(0, 10);
+  return d.toISOString().slice(0, 10); // YYYY-MM-DD
 }
 
 async function getClientById(clientId) {
@@ -65,6 +65,7 @@ async function createCredit(auth, clientId, payload) {
   if (!clientRow || clientRow.deleted_at) throw new AppError(404, "NOT_FOUND", "Cliente no encontrado");
   if (clientRow.admin_id !== auth.adminId) throw new AppError(403, "FORBIDDEN", "Cliente no pertenece a tu admin");
 
+  // Resolver vendor_id
   let vendorId = null;
 
   if (auth.role === "vendor") {
@@ -78,13 +79,15 @@ async function createCredit(auth, clientId, payload) {
 
     vendorId = auth.vendorId;
 
-    // vendor puede crear si cliente asignado directo O está en ruta asignada
+    // ✅ vendor puede crear crédito si:
+    // - el cliente está asignado directo (client.vendor_id == vendorId)
+    // - O el cliente está en una ruta asignada a este vendor
     if (clientRow.vendor_id !== vendorId) {
       const inRoute = await vendorHasClientInAssignedRoute(auth.adminId, vendorId, clientId);
       if (!inRoute) throw new AppError(403, "FORBIDDEN", "No asignado a este vendor");
     }
   } else {
-    // admin puede asignar vendor opcional
+    // admin puede asignar vendor_id opcionalmente
     if (payload.vendor_id) {
       const v = await getVendorById(payload.vendor_id);
       if (!v || v.deleted_at) throw new AppError(404, "NOT_FOUND", "Vendor no encontrado");
@@ -103,15 +106,16 @@ async function createCredit(auth, clientId, payload) {
   const total = round2(principal * (1 + interestRate / 100));
   const balance = total;
 
+  // distribuir cuotas exactas en centavos
   const centsTotal = Math.round(total * 100);
   const baseCents = Math.floor(centsTotal / count);
   const remainder = centsTotal - baseCents * count;
 
-  const db = await pool.connect();
+  const client = await pool.connect();
   try {
-    await db.query("BEGIN");
+    await client.query("BEGIN");
 
-    const cr = await db.query(
+    const cr = await client.query(
       `INSERT INTO credits
         (admin_id, client_id, vendor_id,
          principal_amount, interest_rate, installments_count, start_date,
@@ -149,15 +153,13 @@ async function createCredit(auth, clientId, payload) {
 
     const credit = cr.rows[0];
 
-    // cuotas
     for (let i = 1; i <= count; i++) {
       let cents = baseCents;
       if (i === count) cents = baseCents + remainder;
-
       const amountDue = cents / 100;
       const dueDate = addDays(payload.start_date, i - 1);
 
-      await db.query(
+      await client.query(
         `INSERT INTO installments
           (credit_id, installment_number, due_date, amount_due, amount_paid, status)
          VALUES
@@ -166,12 +168,12 @@ async function createCredit(auth, clientId, payload) {
       );
     }
 
-    // ✅ Caja automática: EGRESO por desembolso (principal)
+    // ✅ Caja automática: egreso por préstamo (principal)
     const note = `Desembolso crédito ${credit.id} (cliente ${clientId})`;
     const occurredAt = new Date(payload.start_date + "T00:00:00.000Z");
 
     // Admin egreso
-    await db.query(
+    await client.query(
       `INSERT INTO admin_cash_movements
         (admin_id, movement_type, category, amount, occurred_at, reference_type, reference_id, note)
        SELECT $1,'expense','credit_disbursement',$2,$3::timestamptz,'credit',$4,$5
@@ -182,9 +184,9 @@ async function createCredit(auth, clientId, payload) {
       [auth.adminId, principal, occurredAt, credit.id, note]
     );
 
-    // Vendor egreso si aplica
+    // Vendor egreso (si el crédito quedó asignado a vendor)
     if (vendorId) {
-      await db.query(
+      await client.query(
         `INSERT INTO vendor_cash_movements
           (admin_id, vendor_id, movement_type, category, amount, occurred_at, reference_type, reference_id, note)
          SELECT $1,$2,'expense','credit_disbursement',$3,$4::timestamptz,'credit',$5,$6
@@ -196,22 +198,23 @@ async function createCredit(auth, clientId, payload) {
       );
     }
 
-    await db.query("COMMIT");
+    await client.query("COMMIT");
     return credit;
   } catch (e) {
-    await db.query("ROLLBACK");
+    await client.query("ROLLBACK");
     throw e;
   } finally {
-    db.release();
+    client.release();
   }
 }
 
 async function createPayment(auth, creditId, payload) {
-  const db = await pool.connect();
+  const client = await pool.connect();
   try {
-    await db.query("BEGIN");
+    await client.query("BEGIN");
 
-    const cr = await db.query(
+    // ✅ Traemos client_id para validar ruta también
+    const cr = await client.query(
       `SELECT id, admin_id, vendor_id, client_id, status,
               balance_amount::float8 AS balance_amount
        FROM credits
@@ -229,6 +232,9 @@ async function createPayment(auth, creditId, payload) {
       if (v.admin_id !== auth.adminId) throw new AppError(403, "FORBIDDEN", "Vendor no pertenece a tu admin");
       if (String(v.status || "").toLowerCase() !== "active") throw new AppError(403, "FORBIDDEN", "Vendor inactivo");
 
+      // ✅ vendor puede pagar si:
+      // - el crédito está asignado a él
+      // - O el cliente está en una ruta asignada a él
       const inRoute = await vendorHasClientInAssignedRoute(auth.adminId, auth.vendorId, credit.client_id);
       if (credit.vendor_id !== auth.vendorId && !inRoute) {
         throw new AppError(403, "FORBIDDEN", "No asignado a este vendor");
@@ -246,7 +252,7 @@ async function createPayment(auth, creditId, payload) {
     const payCents = Math.round(amount * 100);
     if (payCents > balanceCents) throw new AppError(400, "VALIDATION_ERROR", "El pago excede el saldo");
 
-    const pr = await db.query(
+    const pr = await client.query(
       `INSERT INTO payments
         (admin_id, credit_id, vendor_id, amount, method, note, paid_at)
        VALUES
@@ -274,12 +280,12 @@ async function createPayment(auth, creditId, payload) {
 
     const payment = pr.rows[0];
 
-    // ✅ Caja automática: INGRESO por pago
+    // ✅ Caja automática: ingreso por pago (admin + vendor)
     const payAt = payment.paid_at ? new Date(payment.paid_at) : new Date();
     const notePay = `Pago ${payment.id} (crédito ${creditId})`;
 
-    // Admin ingreso
-    await db.query(
+    // Admin ingreso (siempre)
+    await client.query(
       `INSERT INTO admin_cash_movements
         (admin_id, movement_type, category, amount, occurred_at, reference_type, reference_id, note)
        SELECT $1,'income','payment',$2,$3::timestamptz,'payment',$4,$5
@@ -291,9 +297,14 @@ async function createPayment(auth, creditId, payload) {
     );
 
     // Vendor ingreso:
+    // - Si el pago lo registra un vendor -> payment.vendor_id
+    // - Si lo registra el admin -> lo imputamos al vendor del crédito (si existe)
     const vendorCashVendorId = payment.vendor_id || credit.vendor_id || null;
+
     if (vendorCashVendorId) {
-      await db.query(
+      const notePayVendor = `Pago ${payment.id} (crédito ${creditId}) vendor ${vendorCashVendorId}`;
+
+      await client.query(
         `INSERT INTO vendor_cash_movements
           (admin_id, vendor_id, movement_type, category, amount, occurred_at, reference_type, reference_id, note)
          SELECT $1,$2,'income','payment',$3,$4::timestamptz,'payment',$5,$6
@@ -301,12 +312,12 @@ async function createPayment(auth, creditId, payload) {
            SELECT 1 FROM vendor_cash_movements
            WHERE admin_id=$1 AND vendor_id=$2 AND reference_type='payment' AND reference_id=$5
          )`,
-        [auth.adminId, vendorCashVendorId, amount, payAt, payment.id, notePay]
+        [auth.adminId, vendorCashVendorId, amount, payAt, payment.id, notePayVendor]
       );
     }
 
-    // aplicar a cuotas FIFO
-    const instRes = await db.query(
+    // FIFO a cuotas
+    const instRes = await client.query(
       `SELECT id, installment_number, amount_due::float8 AS amount_due, amount_paid::float8 AS amount_paid, status, due_date
        FROM installments
        WHERE credit_id = $1
@@ -331,12 +342,11 @@ async function createPayment(auth, creditId, payload) {
 
       const dueDate = new Date(inst.due_date + "T00:00:00.000Z");
       const today = new Date();
-      const todayDate = new Date(today.toISOString().slice(0, 10) + "T00:00:00.000Z");
-      const isPastDue = dueDate.getTime() < todayDate.getTime();
+      const isPastDue = dueDate.getTime() < new Date(today.toISOString().slice(0, 10) + "T00:00:00.000Z").getTime();
 
       const newStatus = fullyPaid ? (isPastDue ? "paid_late" : "paid") : isPastDue ? "late" : "pending";
 
-      await db.query(
+      await client.query(
         `UPDATE installments
          SET amount_paid = $2,
              status = $3,
@@ -352,7 +362,7 @@ async function createPayment(auth, creditId, payload) {
     const finalBalance = newBalance < 0 ? 0 : newBalance;
     const paidOff = Math.round(finalBalance * 100) <= 0;
 
-    await db.query(
+    await client.query(
       `UPDATE credits
        SET balance_amount = $2,
            balance = $2,
@@ -362,17 +372,17 @@ async function createPayment(auth, creditId, payload) {
       [creditId, finalBalance, paidOff]
     );
 
-    await db.query("COMMIT");
+    await client.query("COMMIT");
 
     return {
       payment,
       credit: { id: creditId, balance_amount: finalBalance, status: paidOff ? "paid" : credit.status }
     };
   } catch (e) {
-    await db.query("ROLLBACK");
+    await client.query("ROLLBACK");
     throw e;
   } finally {
-    db.release();
+    client.release();
   }
 }
 

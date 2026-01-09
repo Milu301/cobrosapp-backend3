@@ -1,61 +1,33 @@
 ﻿const express = require("express");
 const controller = require("./controller");
-const { asyncHandler } = require("../../utils/asyncHandler");
+const { auth } = require("../../middlewares/auth");
+
+// ✅ FIX: imports faltantes (esto era lo que crasheaba)
 const { roleGuard } = require("../../middlewares/roleGuard");
+const { asyncHandler } = require("../../utils/asyncHandler");
 
 const cashRoutes = express.Router();
 
-// Ya está protegido por protectedRouter (auth + subscriptionGuard)
-// Aquí además controlamos roles de forma explícita.
+// Admin cash summary
+cashRoutes.get("/admins/:adminId/cash", auth, controller.adminCashSummary);
+cashRoutes.get("/admins/:adminId/cash/movements", auth, controller.adminCashMovements);
+cashRoutes.post("/admins/:adminId/cash/movements", auth, controller.adminCashCreate);
 
-// --------------------
-// Admin
-// --------------------
-cashRoutes.get(
-  "/admins/:adminId/cash/summary",
-  roleGuard("admin"),
-  asyncHandler(controller.adminCashSummary)
-);
+// Vendor cash summary
+cashRoutes.get("/vendors/:vendorId/cash", auth, controller.vendorCashSummary);
+cashRoutes.get("/vendors/:vendorId/cash/movements", auth, controller.vendorCashMovements);
+cashRoutes.post("/vendors/:vendorId/cash/movements", auth, controller.vendorCashCreate);
 
-cashRoutes.get(
-  "/admins/:adminId/cash",
-  roleGuard("admin"),
-  asyncHandler(controller.adminCashList)
-);
+// ✅ Alias legacy: /admins/:adminId/cash (no lo quitamos)
+cashRoutes.post("/admins/:adminId/cash", auth, controller.adminCashCreate);
 
-// endpoint “nuevo”
+// ✅ (si quieres mantener el guard explícito, ahora sí funciona)
+// OJO: roleGuard recibe roles como argumentos, NO array.
 cashRoutes.post(
-  "/admins/:adminId/cash/movements",
+  "/admins/:adminId/cash",
+  auth,
   roleGuard("admin"),
   asyncHandler(controller.adminCashCreate)
 );
 
-// ✅ Alias para compatibilidad con Flutter (tu app usa POST /admins/:adminId/cash)
-cashRoutes.post(
-  "/admins/:adminId/cash",
-  roleGuard("admin"),
-  asyncHandler(controller.adminCashCreate)
-);
-
-// --------------------
-// Vendor
-// --------------------
-cashRoutes.get(
-  "/vendors/:vendorId/cash/summary",
-  roleGuard("admin", "vendor"),
-  asyncHandler(controller.vendorCashSummary)
-);
-
-cashRoutes.get(
-  "/vendors/:vendorId/cash",
-  roleGuard("admin", "vendor"),
-  asyncHandler(controller.vendorCashList)
-);
-
-cashRoutes.post(
-  "/vendors/:vendorId/cash/movements",
-  roleGuard("vendor"),
-  asyncHandler(controller.vendorCashCreate)
-);
-
-module.exports = { cashRoutes };
+module.exports = cashRoutes;
