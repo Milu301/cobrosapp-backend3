@@ -1,100 +1,68 @@
 const { pool, query } = require("../../db/pool");
 const { AppError } = require("../../utils/appError");
 
-async function assertRouteBelongsToAdmin(routeId, adminId) {
+function toInt(v, def) {
+  const n = parseInt(v, 10);
+  return Number.isFinite(n) ? n : def;
+}
+
+async function assertRouteBelongsToAdmin(adminId, routeId) {
   const r = await query(
     `SELECT id, admin_id, deleted_at
      FROM routes
-     WHERE id = $1
-     LIMIT 1`,
+     WHERE id = $1`,
     [routeId]
   );
-
   const row = r.rows[0];
   if (!row || row.deleted_at) throw new AppError(404, "NOT_FOUND", "Ruta no encontrada");
   if (row.admin_id !== adminId) throw new AppError(403, "FORBIDDEN", "Ruta no pertenece a tu admin");
-  return row;
+  return true;
 }
 
-async function assertVendorBelongsToAdmin(vendorId, adminId) {
-  const r = await query(
-    `SELECT id, admin_id, status, deleted_at
-     FROM vendors
-     WHERE id = $1
-     LIMIT 1`,
-    [vendorId]
-  );
+async function listRoutes(adminId, { q, status, limit, offset }) {
+  const lim = Math.min(Math.max(toInt(limit, 50), 1), 200);
+  const off = Math.max(toInt(offset, 0), 0);
 
-  const row = r.rows[0];
-  if (!row || row.deleted_at) throw new AppError(404, "NOT_FOUND", "Vendor no encontrado");
-  if (row.admin_id !== adminId) throw new AppError(403, "FORBIDDEN", "Vendor no pertenece a tu admin");
-  if (String(row.status || "").toLowerCase() !== "active") throw new AppError(403, "FORBIDDEN", "Vendor inactivo");
-  return row;
-}
-
-async function getRouteClientsAdmin(adminId, routeId) {
-  await assertRouteBelongsToAdmin(routeId, adminId);
-
-  const r = await query(
-    `SELECT
-       c.id,
-       c.admin_id,
-       c.vendor_id,
-       c.name,
-       c.phone,
-       c.address,
-       c.status,
-       rc.is_active,
-       rc.created_at
-     FROM route_clients rc
-     JOIN clients c ON c.id = rc.client_id
-     WHERE rc.route_id = $1
-       AND rc.deleted_at IS NULL
-       AND c.deleted_at IS NULL
-     ORDER BY c.name ASC`,
-    [routeId]
-  );
-
-  return r.rows;
-}
-
-async function listRoutes(adminId, { q, status, limit = 50, offset = 0 }) {
-  const where = ["admin_id = $1", "deleted_at IS NULL"];
+  const where = ["r.admin_id = $1", "r.deleted_at IS NULL"];
   const params = [adminId];
-  let p = 1;
+  let idx = 1;
 
   if (status) {
     params.push(status);
-    where.push(`status = $${++p}`);
+    where.push(`r.status = $${++idx}`);
   }
 
   if (q && q.trim() !== "") {
     params.push(`%${q.trim()}%`);
-    where.push(`(name ILIKE $${++p} OR description ILIKE $${p})`);
+    where.push(`(r.name ILIKE $${++idx} OR COALESCE(r.description,'') ILIKE $${idx})`);
   }
 
-  // ⚠️ Importante:
-  // Para evitar errores tipo "bind message supplies X parameters..."
-  // NO mandamos limit/offset como parámetros $n.
-  // En su lugar los incrustamos como enteros sanitizados.
-  const limitN = Math.max(1, Math.min(200, Number(limit) || 50));
-  const offsetN = Math.max(0, Number(offset) || 0);
+  params.push(lim);
+  params.push(off);
 
   const itemsRes = await query(
     `SELECT
-       id, admin_id, name, description, status, start_date, end_date, created_at, updated_at
-     FROM routes
+        r.id, r.admin_id, r.name, r.description, r.status, r.created_at, r.updated_at,
+        COALESCE(x.clients_count,0)::int AS clients_count
+     FROM routes r
+     LEFT JOIN LATERAL (
+       SELECT COUNT(*)::int AS clients_count
+       FROM route_clients rc
+       WHERE rc.route_id = r.id
+         AND rc.deleted_at IS NULL
+         AND rc.is_active = true
+     ) x ON true
      WHERE ${where.join(" AND ")}
-     ORDER BY created_at DESC
-     LIMIT ${limitN} OFFSET ${offsetN}`,
+     ORDER BY r.created_at DESC
+     LIMIT $${idx + 1} OFFSET $${idx + 2}`,
     params
   );
 
   const totalRes = await query(
     `SELECT COUNT(*)::int AS total
-     FROM routes
+     FROM routes r
      WHERE ${where.join(" AND ")}`,
-    params
+    params.slice(0, idx)
   );
 
   return { items: itemsRes.rows, total: totalRes.rows[0]?.total || 0 };
@@ -102,287 +70,355 @@ async function listRoutes(adminId, { q, status, limit = 50, offset = 0 }) {
 
 async function createRoute(adminId, payload) {
   const r = await query(
-    `INSERT INTO routes
-      (admin_id, name, description, status, start_date, end_date)
-     VALUES
-      ($1,$2,$3,$4,$5,$6)
-     RETURNING
-      id, admin_id, name, description, status, start_date, end_date, created_at, updated_at`,
-    [
-      adminId,
-      payload.name,
-      payload.description || null,
-      payload.status || "active",
-      payload.start_date || null,
-      payload.end_date || null
-    ]
+    `INSERT INTO routes (admin_id, name, description, status)
+     VALUES ($1,$2,$3, COALESCE($4,'active'))
+     RETURNING id, admin_id, name, description, status, created_at, updated_at`,
+    [adminId, payload.name, payload.description || null, payload.status || "active"]
   );
   return r.rows[0];
 }
 
-async function updateRoute(adminId, routeId, payload) {
-  await assertRouteBelongsToAdmin(routeId, adminId);
+async function updateRoute(routeId, adminId, patch) {
+  await assertRouteBelongsToAdmin(adminId, routeId);
 
-  const r = await query(
-    `UPDATE routes
-     SET name = COALESCE($3, name),
-         description = COALESCE($4, description),
-         status = COALESCE($5, status),
-         start_date = COALESCE($6, start_date),
-         end_date = COALESCE($7, end_date),
-         updated_at = now()
-     WHERE id = $1 AND admin_id = $2 AND deleted_at IS NULL
-     RETURNING
-      id, admin_id, name, description, status, start_date, end_date, created_at, updated_at`,
-    [
-      routeId,
-      adminId,
-      payload.name ?? null,
-      payload.description ?? null,
-      payload.status ?? null,
-      payload.start_date ?? null,
-      payload.end_date ?? null
-    ]
-  );
+  const allowed = ["name", "description", "status"];
+  const sets = [];
+  const params = [];
+  let i = 0;
 
-  const row = r.rows[0];
-  if (!row) throw new AppError(404, "NOT_FOUND", "Ruta no encontrada");
-  return row;
-}
-
-async function deleteRoute(adminId, routeId) {
-  await assertRouteBelongsToAdmin(routeId, adminId);
-
-  await query(
-    `UPDATE routes
-     SET deleted_at = now(),
-         updated_at = now()
-     WHERE id = $1 AND admin_id = $2 AND deleted_at IS NULL`,
-    [routeId, adminId]
-  );
-
-  return { id: routeId };
-}
-
-async function addClientToRoute(adminId, routeId, clientId) {
-  await assertRouteBelongsToAdmin(routeId, adminId);
-
-  const c = await query(
-    `SELECT id, admin_id, deleted_at
-     FROM clients
-     WHERE id = $1
-     LIMIT 1`,
-    [clientId]
-  );
-  const client = c.rows[0];
-  if (!client || client.deleted_at) throw new AppError(404, "NOT_FOUND", "Cliente no encontrado");
-  if (client.admin_id !== adminId) throw new AppError(403, "FORBIDDEN", "Cliente no pertenece a tu admin");
-
-  await query(
-    `INSERT INTO route_clients
-      (admin_id, route_id, client_id, is_active)
-     VALUES
-      ($1,$2,$3,true)
-     ON CONFLICT (route_id, client_id)
-     DO UPDATE SET
-       is_active = true,
-       deleted_at = NULL,
-       updated_at = now()`,
-    [adminId, routeId, clientId]
-  );
-
-  return { route_id: routeId, client_id: clientId };
-}
-
-async function removeClientFromRoute(adminId, routeId, clientId) {
-  await assertRouteBelongsToAdmin(routeId, adminId);
-
-  await query(
-    `UPDATE route_clients
-     SET is_active = false,
-         deleted_at = now(),
-         updated_at = now()
-     WHERE admin_id = $1
-       AND route_id = $2
-       AND client_id = $3
-       AND deleted_at IS NULL`,
-    [adminId, routeId, clientId]
-  );
-
-  return { route_id: routeId, client_id: clientId };
-}
-
-async function assignRouteToVendor(adminId, routeId, vendorId, payload) {
-  await assertRouteBelongsToAdmin(routeId, adminId);
-  await assertVendorBelongsToAdmin(vendorId, adminId);
-
-  const assignedDate = payload.assigned_date;
-
-  const client = await pool.connect();
-  try {
-    await client.query("BEGIN");
-
-    // cerrar asignación anterior activa
-    await client.query(
-      `UPDATE route_assignments
-       SET status = 'completed',
-           completed_at = now(),
-           updated_at = now()
-       WHERE admin_id = $1
-         AND route_id = $2
-         AND deleted_at IS NULL
-         AND status = 'assigned'`,
-      [adminId, routeId]
-    );
-
-    // crear nueva asignación
-    const r = await client.query(
-      `INSERT INTO route_assignments
-        (admin_id, route_id, vendor_id, assigned_date, status)
-       VALUES
-        ($1,$2,$3,$4,'assigned')
-       RETURNING
-        id, admin_id, route_id, vendor_id, assigned_date, status, created_at, updated_at`,
-      [adminId, routeId, vendorId, assignedDate]
-    );
-
-    await client.query("COMMIT");
-    return r.rows[0];
-  } catch (e) {
-    await client.query("ROLLBACK");
-    throw e;
-  } finally {
-    client.release();
+  for (const key of allowed) {
+    if (patch[key] === undefined) continue;
+    params.push(patch[key]);
+    sets.push(`${key} = $${++i}`);
   }
-}
 
-async function getVendorActiveAssignment(adminId, vendorId) {
+  if (!sets.length) throw new AppError(400, "VALIDATION_ERROR", "Nada para actualizar");
+
+  params.push(routeId);
+  params.push(adminId);
+
   const r = await query(
-    `SELECT ra.id, ra.route_id, ra.vendor_id, ra.status, ra.assigned_date, ra.created_at
-     FROM route_assignments ra
-     JOIN routes rt ON rt.id = ra.route_id
-     WHERE ra.admin_id = $1
-       AND ra.vendor_id = $2
-       AND ra.deleted_at IS NULL
-       AND rt.deleted_at IS NULL
-       AND ra.status IN ('assigned','completed')
-     ORDER BY ra.assigned_date DESC, ra.created_at DESC
-     LIMIT 1`,
-    [adminId, vendorId]
+    `UPDATE routes
+     SET ${sets.join(", ")},
+         updated_at = now()
+     WHERE id = $${++i} AND admin_id = $${++i} AND deleted_at IS NULL
+     RETURNING id, admin_id, name, description, status, created_at, updated_at`,
+    params
   );
 
   return r.rows[0] || null;
 }
 
-async function getRouteDay(auth, routeId) {
-  // vendor ve solo su asignación actual/reciente
-  const route = await query(
-    `SELECT id, admin_id, deleted_at
-     FROM routes
-     WHERE id = $1
-     LIMIT 1`,
-    [routeId]
-  );
-  const rt = route.rows[0];
-  if (!rt || rt.deleted_at) throw new AppError(404, "NOT_FOUND", "Ruta no encontrada");
-  if (rt.admin_id !== auth.adminId) throw new AppError(403, "FORBIDDEN", "Ruta no pertenece a tu admin");
+async function softDeleteRoute(routeId, adminId) {
+  await assertRouteBelongsToAdmin(adminId, routeId);
 
-  if (auth.role === "vendor") {
-    const assign = await getVendorActiveAssignment(auth.adminId, auth.vendorId);
-    if (!assign || assign.route_id !== routeId) {
-      throw new AppError(403, "FORBIDDEN", "Ruta no asignada a este vendor");
-    }
-  }
+  const r = await query(
+    `UPDATE routes
+     SET deleted_at = now(),
+         status = 'inactive',
+         updated_at = now()
+     WHERE id = $1 AND admin_id = $2 AND deleted_at IS NULL
+     RETURNING id`,
+    [routeId, adminId]
+  );
+  return r.rows[0] || null;
+}
+
+async function getRouteClientsAdmin(adminId, routeId) {
+  await assertRouteBelongsToAdmin(adminId, routeId);
 
   const r = await query(
     `SELECT
-       c.id,
-       c.name,
-       c.phone,
-       c.address,
-       c.vendor_id,
-       rc.is_active
+        c.id, c.admin_id, c.vendor_id, c.name, c.phone, c.doc_id, c.address, c.notes, c.status,
+        rc.visit_order
      FROM route_clients rc
      JOIN clients c ON c.id = rc.client_id
      WHERE rc.route_id = $1
        AND rc.deleted_at IS NULL
        AND rc.is_active = true
+       AND c.admin_id = $2
        AND c.deleted_at IS NULL
-     ORDER BY c.name ASC`,
-    [routeId]
-  );
-
-  return r.rows;
-}
-
-async function createRouteVisit(auth, routeId, payload) {
-  const rt = await assertRouteBelongsToAdmin(routeId, auth.adminId);
-
-  if (auth.role === "vendor") {
-    const assign = await getVendorActiveAssignment(auth.adminId, auth.vendorId);
-    if (!assign || assign.route_id !== routeId) {
-      throw new AppError(403, "FORBIDDEN", "Ruta no asignada a este vendor");
-    }
-  }
-
-  const r = await query(
-    `INSERT INTO route_visits
-      (admin_id, route_id, vendor_id, client_id, visited_at, lat, lng, note)
-     VALUES
-      ($1,$2,$3,$4,COALESCE($5, now()),$6,$7,$8)
-     RETURNING
-      id, admin_id, route_id, vendor_id, client_id, visited_at, lat, lng, note, created_at`,
-    [
-      auth.adminId,
-      rt.id,
-      auth.role === "vendor" ? auth.vendorId : (payload.vendor_id || null),
-      payload.client_id,
-      payload.visited_at || null,
-      payload.lat || null,
-      payload.lng || null,
-      payload.note || null
-    ]
-  );
-
-  return r.rows[0];
-}
-async function getRouteClientsAdmin(adminId, routeId) {
-  const r = await query(
-    `
-    SELECT 
-      rc.client_id,
-      rc.order_index,
-      c.name,
-      c.phone,
-      c.address,
-      c.status
-    FROM route_clients rc
-    JOIN routes rt ON rt.id = rc.route_id
-    JOIN clients c ON c.id = rc.client_id
-    WHERE rc.route_id = $1
-      AND rt.admin_id = $2
-      AND rc.deleted_at IS NULL
-      AND rc.is_active = true
-      AND rt.deleted_at IS NULL
-      AND c.deleted_at IS NULL
-    ORDER BY rc.order_index ASC
-    `,
+     ORDER BY rc.visit_order ASC`,
     [routeId, adminId]
   );
 
   return r.rows;
 }
 
+async function setRouteClients(adminId, routeId, clients) {
+  await assertRouteBelongsToAdmin(adminId, routeId);
+
+  if (!Array.isArray(clients)) throw new AppError(400, "VALIDATION_ERROR", "clients inválido");
+
+  const db = await pool.connect();
+  try {
+    await db.query("BEGIN");
+
+    // borramos el “set” anterior para evitar duplicados
+    await db.query(`DELETE FROM route_clients WHERE route_id = $1`, [routeId]);
+
+    // insert nuevo set
+    for (const item of clients) {
+      const clientId = item.client_id || item.id;
+      const visitOrder = Number.isFinite(item.visit_order) ? item.visit_order : null;
+
+      if (!clientId) continue;
+
+      // validar cliente pertenece al admin
+      const c = await db.query(
+        `SELECT id FROM clients WHERE id = $1 AND admin_id = $2 AND deleted_at IS NULL`,
+        [clientId, adminId]
+      );
+      if (!c.rows[0]) continue;
+
+      await db.query(
+        `INSERT INTO route_clients (route_id, client_id, visit_order, is_active)
+         VALUES ($1,$2, COALESCE($3, 999999), true)`,
+        [routeId, clientId, visitOrder]
+      );
+    }
+
+    await db.query("COMMIT");
+    return true;
+  } catch (e) {
+    await db.query("ROLLBACK");
+    throw e;
+  } finally {
+    db.release();
+  }
+}
+
+async function reorderRouteClients(adminId, routeId, items) {
+  await assertRouteBelongsToAdmin(adminId, routeId);
+  if (!Array.isArray(items)) throw new AppError(400, "VALIDATION_ERROR", "items inválido");
+
+  const db = await pool.connect();
+  try {
+    await db.query("BEGIN");
+
+    for (const it of items) {
+      const clientId = it.client_id || it.id;
+      const visitOrder = toInt(it.visit_order, null);
+      if (!clientId || visitOrder === null) continue;
+
+      await db.query(
+        `UPDATE route_clients
+         SET visit_order = $3,
+             updated_at = now()
+         WHERE route_id = $1
+           AND client_id = $2`,
+        [routeId, clientId, visitOrder]
+      );
+    }
+
+    await db.query("COMMIT");
+    return true;
+  } catch (e) {
+    await db.query("ROLLBACK");
+    throw e;
+  } finally {
+    db.release();
+  }
+}
+
+async function assignRouteToVendor(adminId, routeId, payload) {
+  await assertRouteBelongsToAdmin(adminId, routeId);
+
+  const vendorId = payload.vendor_id;
+  const assignedDate = payload.assigned_date; // YYYY-MM-DD
+
+  if (!vendorId) throw new AppError(400, "VALIDATION_ERROR", "vendor_id requerido");
+  if (!assignedDate) throw new AppError(400, "VALIDATION_ERROR", "assigned_date requerido");
+
+  // validar vendor
+  const v = await query(
+    `SELECT id, admin_id, status, deleted_at
+     FROM vendors
+     WHERE id = $1`,
+    [vendorId]
+  );
+  const vendor = v.rows[0];
+  if (!vendor || vendor.deleted_at) throw new AppError(400, "VALIDATION_ERROR", "vendor_id inválido");
+  if (vendor.admin_id !== adminId) throw new AppError(403, "FORBIDDEN", "Vendor no pertenece a tu admin");
+  if (String(vendor.status || "").toLowerCase() !== "active")
+    throw new AppError(403, "FORBIDDEN", "Vendor inactivo");
+
+  const db = await pool.connect();
+  try {
+    await db.query("BEGIN");
+
+    // “cancelar” asignaciones anteriores en ese día para esa ruta (evita duplicados raros)
+    await db.query(
+      `UPDATE route_assignments
+       SET deleted_at = now(),
+           updated_at = now()
+       WHERE admin_id = $1
+         AND route_id = $2
+         AND assigned_date = $3::date
+         AND deleted_at IS NULL`,
+      [adminId, routeId, assignedDate]
+    );
+
+    const ins = await db.query(
+      `INSERT INTO route_assignments (admin_id, route_id, vendor_id, assigned_date, status, notes)
+       VALUES ($1,$2,$3,$4::date,'assigned',$5)
+       RETURNING id, admin_id, route_id, vendor_id, assigned_date, status, notes, created_at`,
+      [adminId, routeId, vendorId, assignedDate, payload.notes || null]
+    );
+
+    await db.query("COMMIT");
+    return ins.rows[0];
+  } catch (e) {
+    await db.query("ROLLBACK");
+    throw e;
+  } finally {
+    db.release();
+  }
+}
+
+// ===== Vendor: ver ruta del día =====
+async function getRouteDay(adminId, vendorId, dateStr) {
+  const d = dateStr || new Date().toISOString().slice(0, 10);
+
+  const assignmentRes = await query(
+    `SELECT
+        ra.id AS assignment_id,
+        ra.admin_id,
+        ra.route_id,
+        ra.vendor_id,
+        ra.assigned_date,
+        ra.status,
+        rt.name AS route_name
+     FROM route_assignments ra
+     JOIN routes rt ON rt.id = ra.route_id
+     WHERE ra.admin_id = $1
+       AND ra.vendor_id = $2
+       AND ra.assigned_date = $3::date
+       AND ra.deleted_at IS NULL
+       AND rt.deleted_at IS NULL
+       AND ra.status IN ('assigned','completed')
+     ORDER BY ra.created_at DESC
+     LIMIT 1`,
+    [adminId, vendorId, d]
+  );
+
+  const assignment = assignmentRes.rows[0];
+  if (!assignment) throw new AppError(404, "NOT_FOUND", "Ruta no encontrada");
+
+  const clientsRes = await query(
+    `
+     WITH last_visit AS (
+       SELECT DISTINCT ON (rv.client_id)
+         rv.client_id, rv.visited, rv.note, rv.visited_at
+       FROM route_visits rv
+       WHERE rv.route_assignment_id = $1
+       ORDER BY rv.client_id, rv.visited_at DESC
+     )
+     SELECT
+       c.id,
+       c.name,
+       c.phone,
+       c.address,
+       rc.visit_order,
+       COALESCE(lv.visited,false) AS visited,
+       lv.note AS visit_note,
+       lv.visited_at,
+
+       -- totales por cobrar
+       COALESCE(SUM(CASE WHEN i.due_date = $4::date THEN GREATEST(i.amount_due - i.amount_paid, 0) ELSE 0 END),0)::float8 AS due_today,
+       COALESCE(SUM(CASE WHEN i.due_date < $4::date THEN GREATEST(i.amount_due - i.amount_paid, 0) ELSE 0 END),0)::float8 AS due_overdue,
+       COALESCE(SUM(CASE WHEN i.due_date <= $4::date THEN GREATEST(i.amount_due - i.amount_paid, 0) ELSE 0 END),0)::float8 AS due_total
+
+     FROM route_clients rc
+     JOIN clients c ON c.id = rc.client_id
+     LEFT JOIN last_visit lv ON lv.client_id = c.id
+
+     LEFT JOIN credits cr
+       ON cr.client_id = c.id
+      AND cr.admin_id = $3
+      AND cr.deleted_at IS NULL
+      AND cr.status IN ('active','late')
+      AND cr.balance_amount > 0
+
+     LEFT JOIN installments i
+       ON i.credit_id = cr.id
+      AND i.status IN ('pending','late')
+      AND (i.amount_due - i.amount_paid) > 0
+
+     WHERE rc.route_id = $2
+       AND rc.deleted_at IS NULL
+       AND rc.is_active = true
+       AND c.admin_id = $3
+       AND c.deleted_at IS NULL
+
+     GROUP BY
+       c.id,
+       c.name,
+       c.phone,
+       c.address,
+       rc.visit_order,
+       lv.visited,
+       lv.note,
+       lv.visited_at
+
+     ORDER BY rc.visit_order ASC
+    `,
+    [assignment.assignment_id, assignment.route_id, adminId, d]
+  );
+
+  const clients = clientsRes.rows.map((row) => ({
+    ...row,
+    visited_at: row.visited_at ? new Date(row.visited_at).toISOString() : null,
+  }));
+
+  const totals = clients.reduce(
+    (acc, c) => {
+      acc.due_today += Number(c.due_today || 0);
+      acc.due_overdue += Number(c.due_overdue || 0);
+      acc.due_total += Number(c.due_total || 0);
+      return acc;
+    },
+    { due_today: 0, due_overdue: 0, due_total: 0 }
+  );
+
+  return { assignment, totals, clients };
+}
+
+// ===== Vendor: marcar visita =====
+async function createRouteVisit(adminId, vendorId, payload) {
+  const { route_assignment_id, client_id, visited, note } = payload;
+
+  // validar assignment pertenece a vendor
+  const ra = await query(
+    `SELECT id, admin_id, vendor_id, deleted_at
+     FROM route_assignments
+     WHERE id = $1`,
+    [route_assignment_id]
+  );
+  const row = ra.rows[0];
+  if (!row || row.deleted_at) throw new AppError(404, "NOT_FOUND", "Ruta no encontrada");
+  if (row.admin_id !== adminId) throw new AppError(403, "FORBIDDEN", "Ruta no pertenece a tu admin");
+  if (row.vendor_id !== vendorId) throw new AppError(403, "FORBIDDEN", "No asignado a este vendor");
+
+  const ins = await query(
+    `INSERT INTO route_visits (admin_id, route_assignment_id, client_id, visited, note)
+     VALUES ($1,$2,$3,$4,$5)
+     RETURNING id, route_assignment_id, client_id, visited, note, visited_at`,
+    [adminId, route_assignment_id, client_id, visited === true, note || null]
+  );
+
+  return ins.rows[0];
+}
+
 module.exports = {
   listRoutes,
   createRoute,
-  getRouteClientsAdmin,
   updateRoute,
-  deleteRoute,
-  addClientToRoute,
-  removeClientFromRoute,
-  assignRouteToVendor,
+  softDeleteRoute,
   getRouteClientsAdmin,
+  setRouteClients,
+  reorderRouteClients,
+  assignRouteToVendor,
   getRouteDay,
-  createRouteVisit
+  createRouteVisit,
 };

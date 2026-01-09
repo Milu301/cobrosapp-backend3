@@ -1,7 +1,91 @@
 const { query } = require("../../db/pool");
 const { AppError } = require("../../utils/appError");
 
+function permTrue(permissions, key) {
+  if (!permissions) return false;
+  const v = permissions[key];
+  return v === true || v === "true" || v === 1 || v === "1";
+}
+
+async function getVendorById(vendorId) {
+  const r = await query(
+    `SELECT id, admin_id, status, permissions, deleted_at
+     FROM vendors
+     WHERE id = $1`,
+    [vendorId]
+  );
+  return r.rows[0] || null;
+}
+
+async function assertVendorBelongsToAdmin(vendorId, adminId) {
+  const v = await getVendorById(vendorId);
+  if (!v || v.deleted_at) throw new AppError(400, "VALIDATION_ERROR", "vendor_id inválido");
+  if (v.admin_id !== adminId) throw new AppError(403, "FORBIDDEN", "Vendor no pertenece a tu admin");
+  return true;
+}
+
+async function assertVendorActive(vendorId, adminId) {
+  const v = await getVendorById(vendorId);
+  if (!v || v.deleted_at) throw new AppError(404, "NOT_FOUND", "Vendor no encontrado");
+  if (v.admin_id !== adminId) throw new AppError(403, "FORBIDDEN", "Vendor no pertenece a tu admin");
+  if (String(v.status || "").toLowerCase() !== "active") throw new AppError(403, "FORBIDDEN", "Vendor inactivo");
+  return v;
+}
+
+// ✅ vendor puede ver un cliente si:
+// - client.vendor_id == vendor
+// - o está en una ruta asignada a ese vendor
+// - o tiene créditos del vendor
+async function vendorCanAccessClient(adminId, vendorId, clientId) {
+  // asignado directo
+  const direct = await query(
+    `SELECT 1
+     FROM clients
+     WHERE id = $1 AND admin_id = $2 AND vendor_id = $3 AND deleted_at IS NULL
+     LIMIT 1`,
+    [clientId, adminId, vendorId]
+  );
+  if (direct.rows[0]) return true;
+
+  // en ruta asignada
+  const inRoute = await query(
+    `
+    SELECT 1
+    FROM route_assignments ra
+    JOIN routes rt ON rt.id = ra.route_id
+    JOIN route_clients rc ON rc.route_id = ra.route_id
+    WHERE ra.admin_id = $1
+      AND ra.vendor_id = $2
+      AND ra.deleted_at IS NULL
+      AND ra.status IN ('assigned','completed')
+      AND rt.deleted_at IS NULL
+      AND rc.deleted_at IS NULL
+      AND rc.is_active = true
+      AND rc.client_id = $3
+    LIMIT 1
+    `,
+    [adminId, vendorId, clientId]
+  );
+  if (inRoute.rows[0]) return true;
+
+  // créditos asignados al vendor
+  const hasCredit = await query(
+    `SELECT 1
+     FROM credits
+     WHERE admin_id = $1
+       AND client_id = $2
+       AND vendor_id = $3
+       AND deleted_at IS NULL
+     LIMIT 1`,
+    [adminId, clientId, vendorId]
+  );
+  return !!hasCredit.rows[0];
+}
+
 async function listAdminClients(adminId, { q, status, vendor_id, limit, offset }) {
+  const lim = Math.min(Math.max(parseInt(limit || "50", 10), 1), 200);
+  const off = Math.max(parseInt(offset || "0", 10), 0);
+
   const where = ["admin_id = $1", "deleted_at IS NULL"];
   const params = [adminId];
   let idx = 1;
@@ -23,8 +107,8 @@ async function listAdminClients(adminId, { q, status, vendor_id, limit, offset }
     );
   }
 
-  params.push(limit);
-  params.push(offset);
+  params.push(lim);
+  params.push(off);
 
   const itemsRes = await query(
     `SELECT id, admin_id, vendor_id, name, phone, doc_id, address, notes, status, created_at, updated_at
@@ -46,6 +130,9 @@ async function listAdminClients(adminId, { q, status, vendor_id, limit, offset }
 }
 
 async function listVendorClients(adminId, vendorId, { q, status, limit, offset }) {
+  const lim = Math.min(Math.max(parseInt(limit || "50", 10), 1), 200);
+  const off = Math.max(parseInt(offset || "0", 10), 0);
+
   const where = ["admin_id = $1", "vendor_id = $2", "deleted_at IS NULL"];
   const params = [adminId, vendorId];
   let idx = 2;
@@ -62,8 +149,8 @@ async function listVendorClients(adminId, vendorId, { q, status, limit, offset }
     );
   }
 
-  params.push(limit);
-  params.push(offset);
+  params.push(lim);
+  params.push(off);
 
   const itemsRes = await query(
     `SELECT id, admin_id, vendor_id, name, phone, doc_id, address, notes, status, created_at, updated_at
@@ -94,58 +181,7 @@ async function getClientById(clientId) {
   return r.rows[0] || null;
 }
 
-/**
- * ✅ Vendor puede ver un cliente si:
- * - client.vendor_id == vendorId
- * - O el cliente está dentro de CUALQUIER ruta asignada a ese vendor (assigned/completed)
- * - O el vendor tiene al menos 1 crédito de ese cliente (para que no se bloquee después)
- */
-async function vendorCanAccessClient(adminId, vendorId, clientId) {
-  const r = await query(
-    `
-    SELECT 1
-    WHERE
-      EXISTS (
-        SELECT 1
-        FROM clients c
-        WHERE c.id = $3
-          AND c.admin_id = $1
-          AND c.deleted_at IS NULL
-          AND c.vendor_id = $2
-      )
-      OR EXISTS (
-        SELECT 1
-        FROM route_assignments ra
-        JOIN routes rt ON rt.id = ra.route_id
-        JOIN route_clients rc ON rc.route_id = ra.route_id
-        WHERE ra.admin_id = $1
-          AND ra.vendor_id = $2
-          AND ra.deleted_at IS NULL
-          AND ra.status IN ('assigned','completed')
-          AND rt.deleted_at IS NULL
-          AND rc.deleted_at IS NULL
-          AND rc.is_active = true
-          AND rc.client_id = $3
-      )
-      OR EXISTS (
-        SELECT 1
-        FROM credits cr
-        WHERE cr.admin_id = $1
-          AND cr.vendor_id = $2
-          AND cr.client_id = $3
-          AND cr.deleted_at IS NULL
-      )
-    LIMIT 1
-    `,
-    [adminId, vendorId, clientId]
-  );
-
-  return !!r.rows[0];
-}
-
-// -------------------------------------------------
-// 💳 Créditos del cliente (para pantalla detalle)
-// -------------------------------------------------
+// ✅ créditos + pagos para detalle
 async function listClientCredits(clientId) {
   const r = await query(
     `SELECT
@@ -194,19 +230,6 @@ async function listClientCredits(clientId) {
   return r.rows;
 }
 
-async function assertVendorBelongsToAdmin(vendorId, adminId) {
-  const r = await query(
-    `SELECT id, admin_id, deleted_at
-     FROM vendors
-     WHERE id = $1`,
-    [vendorId]
-  );
-  const v = r.rows[0];
-  if (!v || v.deleted_at) throw new AppError(400, "VALIDATION_ERROR", "vendor_id inválido");
-  if (v.admin_id !== adminId) throw new AppError(403, "FORBIDDEN", "Vendor no pertenece a tu admin");
-  return true;
-}
-
 async function createClient({ adminId, vendorId, name, phone, doc_id, address, notes, status }) {
   const r = await query(
     `INSERT INTO clients (admin_id, vendor_id, name, phone, doc_id, address, notes, status)
@@ -229,14 +252,15 @@ async function updateClient(clientId, adminId, patch) {
     sets.push(`${key} = $${++i}`);
   }
 
-  if (sets.length === 0) throw new AppError(400, "VALIDATION_ERROR", "Nada para actualizar");
+  if (!sets.length) throw new AppError(400, "VALIDATION_ERROR", "Nada para actualizar");
 
   params.push(clientId);
   params.push(adminId);
 
   const r = await query(
     `UPDATE clients
-     SET ${sets.join(", ")}
+     SET ${sets.join(", ")},
+         updated_at = now()
      WHERE id = $${++i} AND admin_id = $${++i} AND deleted_at IS NULL
      RETURNING id, admin_id, vendor_id, name, phone, doc_id, address, notes, status, created_at, updated_at`,
     params
@@ -248,7 +272,7 @@ async function updateClient(clientId, adminId, patch) {
 async function softDeleteClient(clientId, adminId) {
   const r = await query(
     `UPDATE clients
-     SET deleted_at = now(), status = 'inactive'
+     SET deleted_at = now(), status = 'inactive', updated_at = now()
      WHERE id = $1 AND admin_id = $2 AND deleted_at IS NULL
      RETURNING id`,
     [clientId, adminId]
@@ -257,13 +281,18 @@ async function softDeleteClient(clientId, adminId) {
 }
 
 module.exports = {
+  permTrue,
+  getVendorById,
+  assertVendorBelongsToAdmin,
+  assertVendorActive,
+  vendorCanAccessClient,
+
   listAdminClients,
   listVendorClients,
   getClientById,
-  vendorCanAccessClient,
   listClientCredits,
-  assertVendorBelongsToAdmin,
+
   createClient,
   updateClient,
-  softDeleteClient
+  softDeleteClient,
 };

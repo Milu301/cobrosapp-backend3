@@ -1,34 +1,17 @@
-﻿const dotenv = require("dotenv");
-dotenv.config();
-
-// Acepta ambos nombres de variable para evitar crashes por typo
-// - CORS_ORIGINS: "*" o lista separada por comas
-// - CORS_ORIGIN:  alias legacy
-const corsOrigins = process.env.CORS_ORIGINS || process.env.CORS_ORIGIN || "*";
-
-const env = {
+﻿const env = {
   NODE_ENV: process.env.NODE_ENV || "development",
-  PORT: Number(process.env.PORT || 3000),
-  HOST: process.env.HOST || "0.0.0.0",
+  PORT: process.env.PORT || 8080,
 
-  // ✅ NUEVO: zona horaria para reportes/caja (ej: America/Bogota)
-  APP_TIMEZONE: process.env.APP_TIMEZONE || "America/Bogota",
+  DATABASE_URL: process.env.DATABASE_URL || null,
 
-  DATABASE_URL: process.env.DATABASE_URL,
-
-  // Supabase/Neon/etc: muchas veces requiere SSL detrás de poolers
-  DB_SSL: String(process.env.DB_SSL || "").toLowerCase() === "true",
-
-  JWT_SECRET: process.env.JWT_SECRET || "secret",
+  JWT_SECRET: process.env.JWT_SECRET || "dev_secret_change_me",
   JWT_EXPIRES_IN: process.env.JWT_EXPIRES_IN || "7d",
 
-  // Compat: el código usa CORS_ORIGINS, pero aceptamos ambos nombres.
-  CORS_ORIGINS: corsOrigins,
-  CORS_ORIGIN: corsOrigins,
+  // ✅ SUBIMOS DEFAULTS (para que ubicación + app no bloquee todo)
+  RATE_LIMIT_WINDOW_MS: parseInt(process.env.RATE_LIMIT_WINDOW_MS || "900000", 10), // 15 min
+  RATE_LIMIT_MAX: parseInt(process.env.RATE_LIMIT_MAX || "5000", 10), // antes 200
 
-  // Subscription / Billing
-  SUBSCRIPTION_ENABLED: String(process.env.SUBSCRIPTION_ENABLED || "false").toLowerCase() === "true",
-  SUBSCRIPTION_TRIAL_DAYS: Number(process.env.SUBSCRIPTION_TRIAL_DAYS || 7),
+  CORS_ORIGIN: process.env.CORS_ORIGIN || "*",
 };
 
-module.exports = { env };
+module.exports = env;
