@@ -65,4 +65,5 @@ cashRoutes.post(
   asyncHandler(safeHandler("createVendorCashMovement"))
 );
 
-module.exports = cashRoutes;
+module.exports = { cashRoutes };
+
