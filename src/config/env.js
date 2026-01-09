@@ -1,35 +1,23 @@
 ﻿const dotenv = require("dotenv");
 dotenv.config();
 
-function must(name, fallback = undefined) {
-  const v = process.env[name] ?? fallback;
-  if (v === undefined || v === null || String(v).trim() === "") {
-    throw new Error(`Missing required env var: ${name}`);
-  }
-  return v;
-}
-
 const env = {
   NODE_ENV: process.env.NODE_ENV || "development",
-  PORT: Number(process.env.PORT || 4000),
-
-  // ✅ NUEVO: bind host (necesario para emulador/lan)
+  PORT: Number(process.env.PORT || 3000),
   HOST: process.env.HOST || "0.0.0.0",
 
-  DATABASE_URL: must("DATABASE_URL"),
-  DB_SSL: (process.env.DB_SSL || "true").toLowerCase() === "true",
+  // ✅ NUEVO: zona horaria para reportes/caja (ej: America/Bogota)
+  APP_TIMEZONE: process.env.APP_TIMEZONE || "America/Bogota",
 
-  JWT_SECRET: must("JWT_SECRET", "CHANGE_ME_SUPER_SECRET"),
+  DATABASE_URL: process.env.DATABASE_URL,
+  JWT_SECRET: process.env.JWT_SECRET || "secret",
   JWT_EXPIRES_IN: process.env.JWT_EXPIRES_IN || "7d",
-  DEVICE_HASH_SALT: process.env.DEVICE_HASH_SALT || process.env.JWT_SECRET || "cobrosapp",
 
-  CORS_ORIGINS: process.env.CORS_ORIGINS || "*",
+  CORS_ORIGIN: process.env.CORS_ORIGIN || "*",
 
-  RATE_LIMIT_WINDOW_MS: Number(process.env.RATE_LIMIT_WINDOW_MS || 900000),
-  RATE_LIMIT_MAX: Number(process.env.RATE_LIMIT_MAX || 200),
-  RATE_LIMIT_AUTH_MAX: Number(process.env.RATE_LIMIT_AUTH_MAX || 20),
-
-  LOG_LEVEL: process.env.LOG_LEVEL || "info"
+  // Subscription / Billing
+  SUBSCRIPTION_ENABLED: String(process.env.SUBSCRIPTION_ENABLED || "false").toLowerCase() === "true",
+  SUBSCRIPTION_TRIAL_DAYS: Number(process.env.SUBSCRIPTION_TRIAL_DAYS || 7),
 };
 
 module.exports = { env };

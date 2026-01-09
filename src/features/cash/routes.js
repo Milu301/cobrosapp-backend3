@@ -1,75 +1,24 @@
 ﻿const express = require("express");
-const { asyncHandler } = require("../../utils/asyncHandler");
-const { roleGuard } = require("../../middlewares/roleGuard");
-const { cashListQuerySchema, cashSummaryQuerySchema, cashMovementCreateSchema } = require("./schema");
 const controller = require("./controller");
+const { requireAuth } = require("../../middlewares/requireAuth");
+const { subscriptionGuard } = require("../../middlewares/subscriptionGuard");
 
 const cashRoutes = express.Router();
 
-/**
- * Vendor cash
- * GET  /vendors/:vendorId/cash?date=YYYY-MM-DD&limit=50&offset=0
- * POST /vendors/:vendorId/cash/movements
- * GET  /vendors/:vendorId/cash/summary?date=YYYY-MM-DD
- */
-cashRoutes.get(
-  "/vendors/:vendorId/cash",
-  roleGuard("admin", "vendor"),
-  asyncHandler(async (req, res) => {
-    req.query = cashListQuerySchema.parse(req.query);
-    return controller.vendorCashList(req, res);
-  })
-);
+cashRoutes.use(requireAuth);
+cashRoutes.use(subscriptionGuard);
 
-cashRoutes.post(
-  "/vendors/:vendorId/cash/movements",
-  roleGuard("vendor"),
-  asyncHandler(async (req, res) => {
-    req.body = cashMovementCreateSchema.parse(req.body);
-    return controller.vendorCashCreate(req, res);
-  })
-);
+// Admin
+cashRoutes.get("/admins/:adminId/cash/summary", controller.adminCashSummary);
+cashRoutes.get("/admins/:adminId/cash", controller.adminCashList);
+cashRoutes.post("/admins/:adminId/cash/movements", controller.adminCashCreate);
 
-cashRoutes.get(
-  "/vendors/:vendorId/cash/summary",
-  roleGuard("admin", "vendor"),
-  asyncHandler(async (req, res) => {
-    req.query = cashSummaryQuerySchema.parse(req.query);
-    return controller.vendorCashSummary(req, res);
-  })
-);
+// ✅ Alias para compatibilidad con Flutter (tu app usa POST /admins/:adminId/cash)
+cashRoutes.post("/admins/:adminId/cash", controller.adminCashCreate);
 
-/**
- * Admin cash
- * GET  /admins/:adminId/cash?date=YYYY-MM-DD&limit=50&offset=0
- * POST /admins/:adminId/cash/movements
- * GET  /admins/:adminId/cash/summary?date=YYYY-MM-DD
- */
-cashRoutes.get(
-  "/admins/:adminId/cash",
-  roleGuard("admin"),
-  asyncHandler(async (req, res) => {
-    req.query = cashListQuerySchema.parse(req.query);
-    return controller.adminCashList(req, res);
-  })
-);
-
-cashRoutes.post(
-  "/admins/:adminId/cash/movements",
-  roleGuard("admin"),
-  asyncHandler(async (req, res) => {
-    req.body = cashMovementCreateSchema.parse(req.body);
-    return controller.adminCashCreate(req, res);
-  })
-);
-
-cashRoutes.get(
-  "/admins/:adminId/cash/summary",
-  roleGuard("admin"),
-  asyncHandler(async (req, res) => {
-    req.query = cashSummaryQuerySchema.parse(req.query);
-    return controller.adminCashSummary(req, res);
-  })
-);
+// Vendor
+cashRoutes.get("/vendors/:vendorId/cash/summary", controller.vendorCashSummary);
+cashRoutes.get("/vendors/:vendorId/cash", controller.vendorCashList);
+cashRoutes.post("/vendors/:vendorId/cash/movements", controller.vendorCashCreate);
 
 module.exports = { cashRoutes };
