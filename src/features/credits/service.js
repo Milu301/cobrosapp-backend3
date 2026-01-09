@@ -79,7 +79,7 @@ async function createCredit(auth, clientId, payload) {
 
     vendorId = auth.vendorId;
 
-    // ✅ vendor puede crear crédito si:
+    // vendor puede crear crédito si:
     // - el cliente está asignado directo (client.vendor_id == vendorId)
     // - O el cliente está en una ruta asignada a este vendor
     if (clientRow.vendor_id !== vendorId) {
@@ -168,11 +168,11 @@ async function createCredit(auth, clientId, payload) {
       );
     }
 
-    // ✅ Caja automática: egreso por préstamo (principal)
-    // Admin egreso
+    // ✅ CAJA AUTOMÁTICA: EGRESO por préstamo (principal)
     const note = `Desembolso crédito ${credit.id} (cliente ${clientId})`;
-    const occurredAt = new Date(payload.start_date + "T00:00:00.000Z");
+    const occurredAt = payload.start_date ? new Date(payload.start_date + "T00:00:00.000Z") : new Date();
 
+    // Admin egreso (sin duplicar)
     await client.query(
       `INSERT INTO admin_cash_movements
         (admin_id, movement_type, category, amount, occurred_at, reference_type, reference_id, note)
@@ -184,7 +184,7 @@ async function createCredit(auth, clientId, payload) {
       [auth.adminId, principal, occurredAt, credit.id, note]
     );
 
-    // Vendor egreso (si el crédito quedó asignado a vendor)
+    // Vendor egreso si hay vendor asignado (sin duplicar)
     if (vendorId) {
       await client.query(
         `INSERT INTO vendor_cash_movements
@@ -213,7 +213,6 @@ async function createPayment(auth, creditId, payload) {
   try {
     await client.query("BEGIN");
 
-    // ✅ Traemos client_id para validar ruta también
     const cr = await client.query(
       `SELECT id, admin_id, vendor_id, client_id, status,
               balance_amount::float8 AS balance_amount
@@ -232,9 +231,6 @@ async function createPayment(auth, creditId, payload) {
       if (v.admin_id !== auth.adminId) throw new AppError(403, "FORBIDDEN", "Vendor no pertenece a tu admin");
       if (String(v.status || "").toLowerCase() !== "active") throw new AppError(403, "FORBIDDEN", "Vendor inactivo");
 
-      // ✅ vendor puede pagar si:
-      // - el crédito está asignado a él
-      // - O el cliente está en una ruta asignada a él
       const inRoute = await vendorHasClientInAssignedRoute(auth.adminId, auth.vendorId, credit.client_id);
       if (credit.vendor_id !== auth.vendorId && !inRoute) {
         throw new AppError(403, "FORBIDDEN", "No asignado a este vendor");
@@ -280,11 +276,11 @@ async function createPayment(auth, creditId, payload) {
 
     const payment = pr.rows[0];
 
-    // ✅ Caja automática: ingreso por pago (admin + vendor)
+    // ✅ CAJA AUTOMÁTICA: INGRESO por pago
     const payAt = payment.paid_at ? new Date(payment.paid_at) : new Date();
-    const notePay = `Pago ${payment.id} (crédito ${creditId})`;
+    const notePay = payload.note || `Pago ${payment.id} (crédito ${creditId})`;
 
-    // Admin ingreso (siempre)
+    // Admin ingreso (sin duplicar)
     await client.query(
       `INSERT INTO admin_cash_movements
         (admin_id, movement_type, category, amount, occurred_at, reference_type, reference_id, note)
@@ -297,12 +293,12 @@ async function createPayment(auth, creditId, payload) {
     );
 
     // Vendor ingreso:
-    // - Si el pago lo registra un vendor -> payment.vendor_id
-    // - Si lo registra el admin -> lo imputamos al vendor del crédito (si existe)
+    // - Si el pago lo registró vendor => payment.vendor_id
+    // - Si lo registró admin => vendor del crédito
     const vendorCashVendorId = payment.vendor_id || credit.vendor_id || null;
 
     if (vendorCashVendorId) {
-      const notePayVendor = `Pago ${payment.id} (crédito ${creditId}) vendor ${vendorCashVendorId}`;
+      const noteVendor = `Pago ${payment.id} (crédito ${creditId}) vendor ${vendorCashVendorId}`;
 
       await client.query(
         `INSERT INTO vendor_cash_movements
@@ -312,7 +308,7 @@ async function createPayment(auth, creditId, payload) {
            SELECT 1 FROM vendor_cash_movements
            WHERE admin_id=$1 AND vendor_id=$2 AND reference_type='payment' AND reference_id=$5
          )`,
-        [auth.adminId, vendorCashVendorId, amount, payAt, payment.id, notePayVendor]
+        [auth.adminId, vendorCashVendorId, amount, payAt, payment.id, noteVendor]
       );
     }
 

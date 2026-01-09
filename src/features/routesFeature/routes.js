@@ -52,8 +52,19 @@ routesFeatureRoutes.delete(
 // ✅ ADMIN: get route clients (NECESARIO para UI reorder)
 routesFeatureRoutes.get(
   "/routes/:routeId/clients",
-  roleGuard("admin"),
-  asyncHandler(controller.adminGetRouteClients)
+  roleGuard("admin", "vendor"),
+  asyncHandler(async (req, res) => {
+    // vendor usa route-day internamente
+    if (req.auth.role === "vendor") {
+      // ✅ usa la ruta actual del día
+      const dateStr = req.query.date || new Date().toISOString().slice(0, 10);
+      const data = await require("./service").getRouteDay(req.auth.adminId, req.auth.vendorId, dateStr);
+      return res.json({ ok: true, data });
+    }
+
+    // admin lista para reorder
+    return controller.adminGetRouteClients(req, res);
+  })
 );
 
 // ADMIN: set clients + reorder

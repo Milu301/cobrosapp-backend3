@@ -29,8 +29,10 @@ async function getOne(req, res) {
   if (client.admin_id !== req.auth.adminId) throw new AppError(403, "FORBIDDEN", "Cliente no pertenece a tu admin");
 
   if (req.auth.role === "vendor") {
-    // ✅ Antes: solo dejaba si client.vendor_id == vendor
-    // ✅ Ahora: también deja si está en una ruta asignada o si tiene créditos del vendor
+    // ✅ vendor puede acceder si:
+    // - client.vendor_id == vendor
+    // - o está en ruta asignada a él
+    // - o tiene créditos del vendor
     const can = await service.vendorCanAccessClient(req.auth.adminId, req.auth.vendorId, clientId);
     if (!can) throw new AppError(403, "FORBIDDEN", "No asignado a este vendor");
   }
@@ -45,6 +47,8 @@ async function adminCreate(req, res) {
   requireAdminParamMatch(req);
 
   const { vendor_id, name, phone, doc_id, address, notes, status } = req.body;
+
+  if (!name || String(name).trim() === "") throw new AppError(400, "VALIDATION_ERROR", "name requerido");
 
   if (vendor_id) await service.assertVendorBelongsToAdmin(vendor_id, req.auth.adminId);
 

@@ -346,10 +346,37 @@ async function createRouteVisit(auth, routeId, payload) {
 
   return r.rows[0];
 }
+async function getRouteClientsAdmin(adminId, routeId) {
+  const r = await query(
+    `
+    SELECT 
+      rc.client_id,
+      rc.order_index,
+      c.name,
+      c.phone,
+      c.address,
+      c.status
+    FROM route_clients rc
+    JOIN routes rt ON rt.id = rc.route_id
+    JOIN clients c ON c.id = rc.client_id
+    WHERE rc.route_id = $1
+      AND rt.admin_id = $2
+      AND rc.deleted_at IS NULL
+      AND rc.is_active = true
+      AND rt.deleted_at IS NULL
+      AND c.deleted_at IS NULL
+    ORDER BY rc.order_index ASC
+    `,
+    [routeId, adminId]
+  );
+
+  return r.rows;
+}
 
 module.exports = {
   listRoutes,
   createRoute,
+  getRouteClientsAdmin,
   updateRoute,
   deleteRoute,
   addClientToRoute,

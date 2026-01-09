@@ -17,5 +17,10 @@ cashRoutes.post("/admins/:adminId/cash", controller.adminCashCreate);
 cashRoutes.get("/vendors/:vendorId/cash/summary", controller.vendorCashSummary);
 cashRoutes.get("/vendors/:vendorId/cash", controller.vendorCashList);
 cashRoutes.post("/vendors/:vendorId/cash/movements", controller.vendorCashCreate);
+cashRoutes.post(
+  "/admins/:adminId/cash",
+  roleGuard("admin"),
+  asyncHandler(async (req, res) => controller.adminCashCreate(req, res))
+);
 
 module.exports = { cashRoutes };
