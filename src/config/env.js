@@ -1,6 +1,11 @@
 ﻿const dotenv = require("dotenv");
 dotenv.config();
 
+// Acepta ambos nombres de variable para evitar crashes por typo
+// - CORS_ORIGINS: "*" o lista separada por comas
+// - CORS_ORIGIN:  alias legacy
+const corsOrigins = process.env.CORS_ORIGINS || process.env.CORS_ORIGIN || "*";
+
 const env = {
   NODE_ENV: process.env.NODE_ENV || "development",
   PORT: Number(process.env.PORT || 3000),
@@ -10,10 +15,16 @@ const env = {
   APP_TIMEZONE: process.env.APP_TIMEZONE || "America/Bogota",
 
   DATABASE_URL: process.env.DATABASE_URL,
+
+  // Supabase/Neon/etc: muchas veces requiere SSL detrás de poolers
+  DB_SSL: String(process.env.DB_SSL || "").toLowerCase() === "true",
+
   JWT_SECRET: process.env.JWT_SECRET || "secret",
   JWT_EXPIRES_IN: process.env.JWT_EXPIRES_IN || "7d",
 
-  CORS_ORIGIN: process.env.CORS_ORIGIN || "*",
+  // Compat: el código usa CORS_ORIGINS, pero aceptamos ambos nombres.
+  CORS_ORIGINS: corsOrigins,
+  CORS_ORIGIN: corsOrigins,
 
   // Subscription / Billing
   SUBSCRIPTION_ENABLED: String(process.env.SUBSCRIPTION_ENABLED || "false").toLowerCase() === "true",

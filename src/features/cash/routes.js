@@ -1,12 +1,9 @@
 ﻿const express = require("express");
 const controller = require("./controller");
-const { requireAuth } = require("../../middlewares/requireAuth");
-const { subscriptionGuard } = require("../../middlewares/subscriptionGuard");
 
 const cashRoutes = express.Router();
 
-cashRoutes.use(requireAuth);
-cashRoutes.use(subscriptionGuard);
+// Ya está protegido por protectedRouter (auth + subscriptionGuard)
 
 // Admin
 cashRoutes.get("/admins/:adminId/cash/summary", controller.adminCashSummary);
