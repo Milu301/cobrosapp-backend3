@@ -19,6 +19,18 @@ async function assertRouteBelongsToAdmin(adminId, routeId) {
   return true;
 }
 
+// ✅ FIX: faltaba esta función y por eso el backend tiraba
+// "Unhandled error: getRouteById is not defined".
+async function getRouteById(routeId) {
+  const r = await query(
+    `SELECT id, admin_id, name, description, status, created_at, updated_at, deleted_at
+     FROM routes
+     WHERE id = $1`,
+    [routeId]
+  );
+  return r.rows[0] || null;
+}
+
 async function listRoutes(adminId, { q, status, limit, offset }) {
   const lim = Math.min(Math.max(toInt(limit, 50), 1), 200);
   const off = Math.max(toInt(offset, 0), 0);
@@ -124,9 +136,8 @@ async function softDeleteRoute(routeId, adminId) {
   return r.rows[0] || null;
 }
 
-async function getRouteClientsAdmin(adminId, routeId) {
-  await assertRouteBelongsToAdmin(adminId, routeId);
-
+// ✅ Helper real (antes estabas llamando listRouteClients pero no existía)
+async function listRouteClients(adminId, routeId) {
   const r = await query(
     `SELECT
         c.id, c.admin_id, c.vendor_id, c.name, c.phone, c.doc_id, c.address, c.notes, c.status,
@@ -141,8 +152,12 @@ async function getRouteClientsAdmin(adminId, routeId) {
      ORDER BY rc.visit_order ASC`,
     [routeId, adminId]
   );
-
   return r.rows;
+}
+
+async function getRouteClientsAdmin(adminId, routeId) {
+  await assertRouteBelongsToAdmin(adminId, routeId);
+  return listRouteClients(adminId, routeId);
 }
 
 async function setRouteClients(adminId, routeId, clients) {
@@ -324,7 +339,6 @@ async function getRouteDay(adminId, vendorId, dateStr) {
        lv.note AS visit_note,
        lv.visited_at,
 
-       -- totales por cobrar
        COALESCE(SUM(CASE WHEN i.due_date = $4::date THEN GREATEST(i.amount_due - i.amount_paid, 0) ELSE 0 END),0)::float8 AS due_today,
        COALESCE(SUM(CASE WHEN i.due_date < $4::date THEN GREATEST(i.amount_due - i.amount_paid, 0) ELSE 0 END),0)::float8 AS due_overdue,
        COALESCE(SUM(CASE WHEN i.due_date <= $4::date THEN GREATEST(i.amount_due - i.amount_paid, 0) ELSE 0 END),0)::float8 AS due_total
@@ -352,14 +366,8 @@ async function getRouteDay(adminId, vendorId, dateStr) {
        AND c.deleted_at IS NULL
 
      GROUP BY
-       c.id,
-       c.name,
-       c.phone,
-       c.address,
-       rc.visit_order,
-       lv.visited,
-       lv.note,
-       lv.visited_at
+       c.id, c.name, c.phone, c.address,
+       rc.visit_order, lv.visited, lv.note, lv.visited_at
 
      ORDER BY rc.visit_order ASC
     `,
@@ -388,7 +396,6 @@ async function getRouteDay(adminId, vendorId, dateStr) {
 async function createRouteVisit(adminId, vendorId, payload) {
   const { route_assignment_id, client_id, visited, note } = payload;
 
-  // validar assignment pertenece a vendor
   const ra = await query(
     `SELECT id, admin_id, vendor_id, deleted_at
      FROM route_assignments
@@ -409,12 +416,6 @@ async function createRouteVisit(adminId, vendorId, payload) {
 
   return ins.rows[0];
 }
-async function getRouteClientsAdmin(adminId, routeId) {
-  const route = await getRouteById(routeId);
-  if (!route || route.deleted_at) return null;
-  if (route.admin_id !== adminId) return null;
-  return listRouteClients(routeId);
-}
 
 module.exports = {
   listRoutes,
@@ -427,4 +428,7 @@ module.exports = {
   assignRouteToVendor,
   getRouteDay,
   createRouteVisit,
+
+  // por si en algún lado lo ocupas
+  getRouteById,
 };

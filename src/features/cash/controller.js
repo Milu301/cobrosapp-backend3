@@ -105,11 +105,56 @@ async function adminCashSummary(req, res) {
   return ok(res, data);
 }
 
+// -------------------------------------------------
+// ✅ Aliases para compat con src/features/cash/routes.js
+// Ese archivo registra handlers con nombres antiguos:
+//   - summary
+//   - listAdminCash / listVendorCash
+//   - createAdminCashMovement / createVendorCashMovement
+// Aquí los exponemos como alias para evitar 500 "handler missing".
+// -------------------------------------------------
+
+// /cash/summary (sin params) decide por rol
+async function summary(req, res) {
+  const { date } = req.query;
+
+  if (req.auth?.role === "vendor") {
+    const vendorId = req.auth.vendorId;
+    const data = await service.vendorCashSummary(
+      { adminId: req.auth.adminId, role: req.auth.role, vendorId: req.auth.vendorId },
+      vendorId,
+      { date }
+    );
+    return ok(res, data);
+  }
+
+  const adminId = req.auth.adminId;
+  const data = await service.adminCashSummary(
+    { adminId: req.auth.adminId },
+    adminId,
+    { date }
+  );
+  return ok(res, data);
+}
+
+// Aliases por nombre esperado en routes.js
+const listAdminCash = adminCashList;
+const listVendorCash = vendorCashList;
+const createAdminCashMovement = adminCashCreate;
+const createVendorCashMovement = vendorCashCreate;
+
 module.exports = {
   vendorCashList,
   vendorCashCreate,
   vendorCashSummary,
   adminCashList,
   adminCashCreate,
-  adminCashSummary
+  adminCashSummary,
+
+  // ✅ compat exports (no remover)
+  summary,
+  listAdminCash,
+  listVendorCash,
+  createAdminCashMovement,
+  createVendorCashMovement
 };
