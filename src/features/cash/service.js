@@ -46,19 +46,52 @@ async function assertAdminOwnsVendor(reqAdminId, vendorId) {
   return v;
 }
 
+// =====================================================
+// ✅ COMPAT: soporta llamadas viejas del controller:
+// - (auth, id, "YYYY-MM-DD", req.query)
+// y llamadas nuevas:
+// - (auth, id, { date, limit, offset })
+// =====================================================
+function normalizeListArgs(optsOrDate, maybeQuery) {
+  if (typeof optsOrDate === "string") {
+    return {
+      date: optsOrDate,
+      limit: maybeQuery?.limit,
+      offset: maybeQuery?.offset,
+    };
+  }
+  return optsOrDate || {};
+}
+
+function normalizeSummaryArgs(optsOrDate) {
+  if (typeof optsOrDate === "string") return { date: optsOrDate };
+  return optsOrDate || {};
+}
+
+function inferRole(auth) {
+  // Si el controller no manda role, inferimos
+  if (auth?.role) return auth.role;
+  if (auth?.vendorId) return "vendor";
+  return "admin";
+}
+
 // ----------------------------------------------------
 // ✅ Caja Vendor
 // ----------------------------------------------------
-async function listVendorCash(auth, vendorIdParam, { date, limit, offset }) {
-  if (auth.role === "vendor") {
+async function listVendorCash(auth, vendorIdParam, optsOrDate, maybeQuery) {
+  const role = inferRole(auth);
+
+  if (role === "vendor") {
     if (auth.vendorId !== vendorIdParam) throw new AppError(403, "FORBIDDEN", "No puedes ver caja de otro vendor");
   } else {
     await assertAdminOwnsVendor(auth.adminId, vendorIdParam);
   }
 
+  const { date, limit, offset } = normalizeListArgs(optsOrDate, maybeQuery);
   assertDateYYYYMMDD(date);
 
-  const limitN = clampInt(limit, { min: 1, max: 200, fallback: 50 });
+  // ✅ schema.js valida max 100
+  const limitN = clampInt(limit, { min: 1, max: 100, fallback: 50 });
   const offsetN = clampInt(offset, { min: 0, max: 1_000_000, fallback: 0 });
 
   const itemsRes = await query(
@@ -90,13 +123,16 @@ async function listVendorCash(auth, vendorIdParam, { date, limit, offset }) {
   return { items: itemsRes.rows, total: totalRes.rows[0]?.total || 0 };
 }
 
-async function vendorCashSummary(auth, vendorIdParam, { date }) {
-  if (auth.role === "vendor") {
+async function vendorCashSummary(auth, vendorIdParam, optsOrDate) {
+  const role = inferRole(auth);
+
+  if (role === "vendor") {
     if (auth.vendorId !== vendorIdParam) throw new AppError(403, "FORBIDDEN", "No puedes ver caja de otro vendor");
   } else {
     await assertAdminOwnsVendor(auth.adminId, vendorIdParam);
   }
 
+  const { date } = normalizeSummaryArgs(optsOrDate);
   assertDateYYYYMMDD(date);
 
   const r = await query(
@@ -118,7 +154,9 @@ async function vendorCashSummary(auth, vendorIdParam, { date }) {
 }
 
 async function createVendorCashMovement(auth, vendorIdParam, payload) {
-  if (auth.role === "vendor") {
+  const role = inferRole(auth);
+
+  if (role === "vendor") {
     if (auth.vendorId !== vendorIdParam) throw new AppError(403, "FORBIDDEN", "No puedes crear caja de otro vendor");
   } else {
     await assertAdminOwnsVendor(auth.adminId, vendorIdParam);
@@ -154,12 +192,14 @@ async function createVendorCashMovement(auth, vendorIdParam, payload) {
 // ----------------------------------------------------
 // ✅ Caja Admin
 // ----------------------------------------------------
-async function listAdminCash(auth, adminIdParam, { date, limit, offset }) {
+async function listAdminCash(auth, adminIdParam, optsOrDate, maybeQuery) {
   await assertAdminOwnsAdmin(auth.adminId, adminIdParam);
 
+  const { date, limit, offset } = normalizeListArgs(optsOrDate, maybeQuery);
   assertDateYYYYMMDD(date);
 
-  const limitN = clampInt(limit, { min: 1, max: 200, fallback: 50 });
+  // ✅ schema.js valida max 100
+  const limitN = clampInt(limit, { min: 1, max: 100, fallback: 50 });
   const offsetN = clampInt(offset, { min: 0, max: 1_000_000, fallback: 0 });
 
   const itemsRes = await query(
@@ -189,9 +229,10 @@ async function listAdminCash(auth, adminIdParam, { date, limit, offset }) {
   return { items: itemsRes.rows, total: totalRes.rows[0]?.total || 0 };
 }
 
-async function adminCashSummary(auth, adminIdParam, { date }) {
+async function adminCashSummary(auth, adminIdParam, optsOrDate) {
   await assertAdminOwnsAdmin(auth.adminId, adminIdParam);
 
+  const { date } = normalizeSummaryArgs(optsOrDate);
   assertDateYYYYMMDD(date);
 
   const r = await query(
@@ -240,11 +281,29 @@ async function createAdminCashMovement(auth, adminIdParam, payload) {
   return r.rows[0];
 }
 
+// =====================================================
+// ✅ ALIASES para que tu controller viejo NO reviente
+// (cashService.adminCashList / vendorCashList / adminCashCreate / vendorCashCreate)
+// =====================================================
+const vendorCashList = listVendorCash;
+const adminCashList = listAdminCash;
+
+const vendorCashCreate = createVendorCashMovement;
+const adminCashCreate = createAdminCashMovement;
+
 module.exports = {
+  // Nombres “nuevos”
   listVendorCash,
   vendorCashSummary,
   createVendorCashMovement,
+
   listAdminCash,
   adminCashSummary,
-  createAdminCashMovement
+  createAdminCashMovement,
+
+  // Compat con controller viejo
+  vendorCashList,
+  adminCashList,
+  vendorCashCreate,
+  adminCashCreate
 };
