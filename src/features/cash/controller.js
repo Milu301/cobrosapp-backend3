@@ -2,8 +2,24 @@ const { ok, created } = require("../../utils/response");
 const { auditLog } = require("../../services/audit.service");
 const service = require("./service");
 
+// ✅ Helper: evita crash si req.params viene undefined
+function getParam(req, key) {
+  const p = req?.params ?? {};
+  return p[key];
+}
+
+// ✅ Helper: para adminId siempre usar param si existe, si no el del token
+function getAdminId(req) {
+  return getParam(req, "adminId") || req?.auth?.adminId;
+}
+
+// ✅ Helper: vendorId param con fallback
+function getVendorId(req) {
+  return getParam(req, "vendorId") || req?.auth?.vendorId;
+}
+
 async function vendorCashList(req, res) {
-  const { vendorId } = req.params;
+  const vendorId = getVendorId(req);
   const { date, limit, offset } = req.query;
 
   const result = await service.listVendorCash(
@@ -16,7 +32,7 @@ async function vendorCashList(req, res) {
 }
 
 async function vendorCashCreate(req, res) {
-  const { vendorId } = req.params;
+  const vendorId = getVendorId(req);
 
   const row = await service.createVendorCashMovement(
     { adminId: req.auth.adminId, role: req.auth.role, vendorId: req.auth.vendorId },
@@ -42,7 +58,7 @@ async function vendorCashCreate(req, res) {
 }
 
 async function vendorCashSummary(req, res) {
-  const { vendorId } = req.params;
+  const vendorId = getVendorId(req);
   const { date } = req.query;
 
   const data = await service.vendorCashSummary(
@@ -55,7 +71,7 @@ async function vendorCashSummary(req, res) {
 }
 
 async function adminCashList(req, res) {
-  const { adminId } = req.params;
+  const adminId = getAdminId(req);
   const { date, limit, offset } = req.query;
 
   const result = await service.listAdminCash(
@@ -68,7 +84,7 @@ async function adminCashList(req, res) {
 }
 
 async function adminCashCreate(req, res) {
-  const { adminId } = req.params;
+  const adminId = getAdminId(req);
 
   const row = await service.createAdminCashMovement(
     { adminId: req.auth.adminId },
@@ -93,7 +109,7 @@ async function adminCashCreate(req, res) {
 }
 
 async function adminCashSummary(req, res) {
-  const { adminId } = req.params;
+  const adminId = getAdminId(req);
   const { date } = req.query;
 
   const data = await service.adminCashSummary(
@@ -107,11 +123,6 @@ async function adminCashSummary(req, res) {
 
 // -------------------------------------------------
 // ✅ Aliases para compat con src/features/cash/routes.js
-// Ese archivo registra handlers con nombres antiguos:
-//   - summary
-//   - listAdminCash / listVendorCash
-//   - createAdminCashMovement / createVendorCashMovement
-// Aquí los exponemos como alias para evitar 500 "handler missing".
 // -------------------------------------------------
 
 // /cash/summary (sin params) decide por rol
@@ -137,7 +148,6 @@ async function summary(req, res) {
   return ok(res, data);
 }
 
-// Aliases por nombre esperado en routes.js
 const listAdminCash = adminCashList;
 const listVendorCash = vendorCashList;
 const createAdminCashMovement = adminCashCreate;
@@ -151,7 +161,6 @@ module.exports = {
   adminCashCreate,
   adminCashSummary,
 
-  // ✅ compat exports (no remover)
   summary,
   listAdminCash,
   listVendorCash,
