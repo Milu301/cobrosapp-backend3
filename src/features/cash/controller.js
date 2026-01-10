@@ -1,169 +1,165 @@
-const { ok, created } = require("../../utils/response");
-const { auditLog } = require("../../services/audit.service");
-const service = require("./service");
+const cashService = require("./service");
+const { AppError } = require("../../utils/appError");
 
-// ✅ Helper: evita crash si req.params viene undefined
+function ok(res, data) {
+  return res.json({ ok: true, data });
+}
+
+// ✅ Helpers: nunca asumas que req.params existe (a veces lo pisan middlewares)
 function getParam(req, key) {
-  const p = req?.params ?? {};
-  return p[key];
+  return (req && req.params && req.params[key]) ? req.params[key] : undefined;
 }
 
-// ✅ Helper: para adminId siempre usar param si existe, si no el del token
-function getAdminId(req) {
-  return getParam(req, "adminId") || req?.auth?.adminId;
-}
-
-// ✅ Helper: vendorId param con fallback
-function getVendorId(req) {
-  return getParam(req, "vendorId") || req?.auth?.vendorId;
-}
-
+// =====================
+// VENDOR
+// =====================
 async function vendorCashList(req, res) {
-  const vendorId = getVendorId(req);
-  const { date, limit, offset } = req.query;
+  const adminId = req?.auth?.adminId;
+  const vendorIdParam = getParam(req, "vendorId") || req?.auth?.vendorId;
+  const dateStr = req?.query?.date;
 
-  const result = await service.listVendorCash(
-    { adminId: req.auth.adminId, role: req.auth.role, vendorId: req.auth.vendorId },
-    vendorId,
-    { date, limit, offset }
+  if (!adminId) throw new AppError(401, "UNAUTHORIZED", "No autenticado");
+  if (!vendorIdParam) throw new AppError(400, "VALIDATION_ERROR", "vendorId requerido");
+  if (!dateStr) throw new AppError(400, "VALIDATION_ERROR", "date requerido");
+
+  const result = await cashService.vendorCashList(
+    { adminId, vendorId: req.auth.vendorId },
+    vendorIdParam,
+    dateStr,
+    req.query
   );
-
-  return ok(res, result.items, { total: result.total, limit, offset, date });
+  return ok(res, result);
 }
 
 async function vendorCashCreate(req, res) {
-  const vendorId = getVendorId(req);
+  const adminId = req?.auth?.adminId;
+  const vendorIdParam = getParam(req, "vendorId") || req?.auth?.vendorId;
 
-  const row = await service.createVendorCashMovement(
-    { adminId: req.auth.adminId, role: req.auth.role, vendorId: req.auth.vendorId },
-    vendorId,
+  if (!adminId) throw new AppError(401, "UNAUTHORIZED", "No autenticado");
+  if (!vendorIdParam) throw new AppError(400, "VALIDATION_ERROR", "vendorId requerido");
+
+  const result = await cashService.vendorCashCreate(
+    { adminId, vendorId: req.auth.vendorId },
+    vendorIdParam,
     req.body
   );
-
-  await auditLog({
-    adminId: req.auth.adminId,
-    vendorId: req.auth.vendorId,
-    actorRole: "vendor",
-    actorId: req.auth.vendorId,
-    action: "VENDOR_CASH_CREATE",
-    entityType: "vendor_cash_movement",
-    entityId: row.id,
-    requestIp: req.ctx.ip,
-    userAgent: req.ctx.userAgent,
-    requestId: req.ctx.requestId,
-    meta: { vendor_id: vendorId, movement_type: row.movement_type, amount: row.amount }
-  });
-
-  return created(res, row);
+  return ok(res, result);
 }
 
 async function vendorCashSummary(req, res) {
-  const vendorId = getVendorId(req);
-  const { date } = req.query;
+  const adminId = req?.auth?.adminId;
+  const vendorIdParam = getParam(req, "vendorId") || req?.auth?.vendorId;
+  const dateStr = req?.query?.date;
 
-  const data = await service.vendorCashSummary(
-    { adminId: req.auth.adminId, role: req.auth.role, vendorId: req.auth.vendorId },
-    vendorId,
-    { date }
+  if (!adminId) throw new AppError(401, "UNAUTHORIZED", "No autenticado");
+  if (!vendorIdParam) throw new AppError(400, "VALIDATION_ERROR", "vendorId requerido");
+  if (!dateStr) throw new AppError(400, "VALIDATION_ERROR", "date requerido");
+
+  const result = await cashService.vendorCashSummary(
+    { adminId, vendorId: req.auth.vendorId },
+    vendorIdParam,
+    dateStr,
+    req.query
   );
-
-  return ok(res, data);
+  return ok(res, result);
 }
 
+// =====================
+// ADMIN
+// =====================
 async function adminCashList(req, res) {
-  const adminId = getAdminId(req);
-  const { date, limit, offset } = req.query;
+  const adminIdParam = getParam(req, "adminId") || req?.auth?.adminId;
+  const dateStr = req?.query?.date;
 
-  const result = await service.listAdminCash(
-    { adminId: req.auth.adminId },
-    adminId,
-    { date, limit, offset }
+  if (!adminIdParam) throw new AppError(400, "VALIDATION_ERROR", "adminId requerido");
+  if (!dateStr) throw new AppError(400, "VALIDATION_ERROR", "date requerido");
+
+  const result = await cashService.adminCashList(
+    { adminId: req?.auth?.adminId, vendorId: req?.auth?.vendorId },
+    adminIdParam,
+    dateStr,
+    req.query
   );
-
-  return ok(res, result.items, { total: result.total, limit, offset, date });
+  return ok(res, result);
 }
 
 async function adminCashCreate(req, res) {
-  const adminId = getAdminId(req);
+  const adminIdParam = getParam(req, "adminId") || req?.auth?.adminId;
 
-  const row = await service.createAdminCashMovement(
-    { adminId: req.auth.adminId },
-    adminId,
+  if (!adminIdParam) throw new AppError(400, "VALIDATION_ERROR", "adminId requerido");
+
+  const result = await cashService.adminCashCreate(
+    { adminId: req?.auth?.adminId, vendorId: req?.auth?.vendorId },
+    adminIdParam,
     req.body
   );
-
-  await auditLog({
-    adminId: req.auth.adminId,
-    actorRole: "admin",
-    actorId: req.auth.adminId,
-    action: "ADMIN_CASH_CREATE",
-    entityType: "admin_cash_movement",
-    entityId: row.id,
-    requestIp: req.ctx.ip,
-    userAgent: req.ctx.userAgent,
-    requestId: req.ctx.requestId,
-    meta: { movement_type: row.movement_type, amount: row.amount }
-  });
-
-  return created(res, row);
+  return ok(res, result);
 }
 
 async function adminCashSummary(req, res) {
-  const adminId = getAdminId(req);
-  const { date } = req.query;
+  const adminIdParam = getParam(req, "adminId") || req?.auth?.adminId;
+  const dateStr = req?.query?.date;
 
-  const data = await service.adminCashSummary(
-    { adminId: req.auth.adminId },
-    adminId,
-    { date }
+  if (!adminIdParam) throw new AppError(400, "VALIDATION_ERROR", "adminId requerido");
+  if (!dateStr) throw new AppError(400, "VALIDATION_ERROR", "date requerido");
+
+  const result = await cashService.adminCashSummary(
+    { adminId: req?.auth?.adminId, vendorId: req?.auth?.vendorId },
+    adminIdParam,
+    dateStr,
+    req.query
   );
-
-  return ok(res, data);
+  return ok(res, result);
 }
 
-// -------------------------------------------------
-// ✅ Aliases para compat con src/features/cash/routes.js
-// -------------------------------------------------
-
-// /cash/summary (sin params) decide por rol
+// =====================================================
+// ✅ Endpoint unificado: GET /cash/summary?date=YYYY-MM-DD
+// Decide por rol usando el token (req.auth.role)
+// =====================================================
 async function summary(req, res) {
-  const { date } = req.query;
+  const role = req?.auth?.role;
+  const dateStr = req?.query?.date;
 
-  if (req.auth?.role === "vendor") {
-    const vendorId = req.auth.vendorId;
-    const data = await service.vendorCashSummary(
-      { adminId: req.auth.adminId, role: req.auth.role, vendorId: req.auth.vendorId },
-      vendorId,
-      { date }
-    );
-    return ok(res, data);
+  if (!dateStr) throw new AppError(400, "VALIDATION_ERROR", "date requerido");
+  if (!role) throw new AppError(401, "UNAUTHORIZED", "No autenticado");
+
+  if (role === "vendor") {
+    req.params = req.params || {};
+    req.params.vendorId = req.params.vendorId || req.auth.vendorId;
+    return vendorCashSummary(req, res);
   }
 
-  const adminId = req.auth.adminId;
-  const data = await service.adminCashSummary(
-    { adminId: req.auth.adminId },
-    adminId,
-    { date }
-  );
-  return ok(res, data);
+  if (role === "admin") {
+    req.params = req.params || {};
+    req.params.adminId = req.params.adminId || req.auth.adminId;
+    return adminCashSummary(req, res);
+  }
+
+  throw new AppError(403, "FORBIDDEN", "Rol no permitido");
 }
 
-const listAdminCash = adminCashList;
+// =====================================================
+// ✅ Aliases para compat con rutas (no rompen nada)
+// =====================================================
 const listVendorCash = vendorCashList;
-const createAdminCashMovement = adminCashCreate;
 const createVendorCashMovement = vendorCashCreate;
+
+const listAdminCash = adminCashList;
+const createAdminCashMovement = adminCashCreate;
 
 module.exports = {
   vendorCashList,
   vendorCashCreate,
   vendorCashSummary,
+
   adminCashList,
   adminCashCreate,
   adminCashSummary,
 
   summary,
-  listAdminCash,
+
   listVendorCash,
+  createVendorCashMovement,
+  listAdminCash,
   createAdminCashMovement,
-  createVendorCashMovement
 };
