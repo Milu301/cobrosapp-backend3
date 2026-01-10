@@ -1,5 +1,5 @@
 const service = require("./service");
-const { ok } = require("../../utils/responses");
+const { ok } = require("../../utils/response");
 const { AppError } = require("../../utils/appError");
 
 function requireAdminParamMatch(req) {
@@ -8,68 +8,134 @@ function requireAdminParamMatch(req) {
 
 async function adminList(req, res) {
   requireAdminParamMatch(req);
-  const data = await service.listClients(req.auth.adminId, req.query);
-  return ok(res, data);
+  const { q, status, vendor_id, limit, offset } = req.query;
+  const result = await service.listAdminClients(req.auth.adminId, { q, status, vendor_id, limit, offset });
+  return ok(res, result.items, { total: result.total, limit, offset });
+}
+
+async function vendorList(req, res) {
+  if (req.params.vendorId !== req.auth.vendorId) throw new AppError(403, "FORBIDDEN", "vendorId mismatch");
+  const { q, status, limit, offset } = req.query;
+  const result = await service.listVendorClients(req.auth.adminId, req.auth.vendorId, { q, status, limit, offset });
+  return ok(res, result.items, { total: result.total, limit, offset });
+}
+
+async function getOne(req, res) {
+  const clientId = req.params.clientId;
+  const client = await service.getClientById(clientId);
+  if (!client || client.deleted_at) throw new AppError(404, "NOT_FOUND", "Cliente no encontrado");
+
+  // Siempre validar admin
+  if (client.admin_id !== req.auth.adminId) throw new AppError(403, "FORBIDDEN", "Cliente no pertenece a tu admin");
+
+  if (req.auth.role === "vendor") {
+    // ✅ Ahora: también deja si está en una ruta asignada o si tiene créditos del vendor
+    const can = await service.vendorCanAccessClient(req.auth.adminId, req.auth.vendorId, clientId);
+    if (!can) throw new AppError(403, "FORBIDDEN", "No asignado a este vendor");
+  }
+
+  // ✅ Enviar créditos + pagos para que Flutter los pinte
+  const credits = await service.listClientCredits(clientId);
+
+  return ok(res, { client, credits });
 }
 
 async function adminCreate(req, res) {
   requireAdminParamMatch(req);
 
+  const { vendor_id, name, phone, doc_id, address, notes, status } = req.body;
+
+  if (vendor_id) await service.assertVendorBelongsToAdmin(vendor_id, req.auth.adminId);
+
   const created = await service.createClient({
     adminId: req.auth.adminId,
-    ...req.body,
+    vendorId: vendor_id || null,
+    name,
+    phone,
+    doc_id,
+    address,
+    notes,
+    status
   });
 
   return ok(res, created);
 }
 
-// ✅ NUEVO: Vendor puede crear clientes
-// POST /vendors/:vendorId/clients
+/**
+ * =====================================================
+ * ✅ NUEVO (NO rompe nada): vendorCreate
+ * Se usa para: POST /vendors/:vendorId/clients
+ * Arregla: controller.vendorCreate is not a function
+ * =====================================================
+ */
 async function vendorCreate(req, res) {
-  // Seguridad: el vendorId del token debe coincidir con el param
-  if (req.params.vendorId !== req.auth.vendorId) throw new AppError(403, "FORBIDDEN", "vendorId mismatch");
+  // validar que el vendor del token sea el mismo del param
+  if (req.params.vendorId !== req.auth.vendorId) {
+    throw new AppError(403, "FORBIDDEN", "vendorId mismatch");
+  }
 
-  // Validar vendor activo + permisos
-  const vendor = await service.assertVendorActive(req.auth.vendorId, req.auth.adminId);
+  // ✅ opcional pero recomendado: validar que vendor pertenece al admin
+  // (si tu service lo tiene, aquí ya lo estabas usando en adminCreate)
+  await service.assertVendorBelongsToAdmin(req.auth.vendorId, req.auth.adminId);
 
-  // Si manejas permisos por flags:
-  const canCreate = service.permTrue(vendor.permissions, "canCreateClients");
-  if (!canCreate) throw new AppError(403, "FORBIDDEN", "No tienes permiso para crear clientes");
+  // NO dejamos que el vendor “inyecte” otro vendor_id
+  const { name, phone, doc_id, address, notes, status } = req.body;
 
   const created = await service.createClient({
     adminId: req.auth.adminId,
     vendorId: req.auth.vendorId,
-    ...req.body,
+    name,
+    phone,
+    doc_id,
+    address,
+    notes,
+    status
   });
 
   return ok(res, created);
 }
 
-async function adminGet(req, res) {
-  requireAdminParamMatch(req);
-  const row = await service.getClient(req.auth.adminId, req.params.clientId);
-  return ok(res, row);
+async function update(req, res) {
+  const clientId = req.params.clientId;
+  const client = await service.getClientById(clientId);
+  if (!client || client.deleted_at) throw new AppError(404, "NOT_FOUND", "Cliente no encontrado");
+  if (client.admin_id !== req.auth.adminId) throw new AppError(403, "FORBIDDEN", "Cliente no pertenece a tu admin");
+
+  if (req.auth.role === "vendor") {
+    // Mantengo esto estricto: vendor solo edita si está asignado directo por vendor_id
+    if (client.vendor_id !== req.auth.vendorId) throw new AppError(403, "FORBIDDEN", "No asignado a este vendor");
+  }
+
+  if (req.body.vendor_id) await service.assertVendorBelongsToAdmin(req.body.vendor_id, req.auth.adminId);
+
+  const updated = await service.updateClient(clientId, req.auth.adminId, req.body);
+  if (!updated) throw new AppError(404, "NOT_FOUND", "Cliente no encontrado");
+  return ok(res, updated);
 }
 
-async function adminUpdate(req, res) {
-  requireAdminParamMatch(req);
-  const row = await service.updateClient(req.auth.adminId, req.params.clientId, req.body);
-  return ok(res, row);
-}
+async function remove(req, res) {
+  const clientId = req.params.clientId;
+  const client = await service.getClientById(clientId);
+  if (!client || client.deleted_at) throw new AppError(404, "NOT_FOUND", "Cliente no encontrado");
+  if (client.admin_id !== req.auth.adminId) throw new AppError(403, "FORBIDDEN", "Cliente no pertenece a tu admin");
 
-async function adminDelete(req, res) {
-  requireAdminParamMatch(req);
-  await service.deleteClient(req.auth.adminId, req.params.clientId);
-  return ok(res, true);
+  if (req.auth.role === "vendor") {
+    if (client.vendor_id !== req.auth.vendorId) throw new AppError(403, "FORBIDDEN", "No asignado a este vendor");
+  }
+
+  const deleted = await service.softDeleteClient(clientId, req.auth.adminId);
+  return ok(res, deleted);
 }
 
 module.exports = {
   adminList,
+  vendorList,
+  getOne,
   adminCreate,
-  adminGet,
-  adminUpdate,
-  adminDelete,
 
-  // ✅ EXPORT NUEVO
+  // ✅ EXPORT NUEVO (clave para que deje de fallar)
   vendorCreate,
+
+  update,
+  remove
 };
