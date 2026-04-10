@@ -303,6 +303,8 @@ async function getRouteDay(adminId, vendorId, dateStr) {
         ra.vendor_id,
         ra.assigned_date,
         ra.status,
+        ra.created_at,
+        ra.updated_at,
         rt.name AS route_name
      FROM route_assignments ra
      JOIN routes rt ON rt.id = ra.route_id
@@ -465,17 +467,164 @@ async function getRouteDay(adminId, vendorId, dateStr) {
 
   allClients = [...allClients, ...deferred];
 
-  const totals = allClients.reduce(
+  const baseTotals = allClients.reduce(
     (acc, c) => {
-      acc.due_today += Number(c.due_today || 0);
+      acc.due_today   += Number(c.due_today   || 0);
       acc.due_overdue += Number(c.due_overdue || 0);
-      acc.due_total += Number(c.due_total || 0);
+      acc.due_total   += Number(c.due_total   || 0);
       return acc;
     },
     { due_today: 0, due_overdue: 0, due_total: 0 }
   );
 
-  return { assignment, totals, clients: allClients };
+  // ── Extra stats: payments, cash movements, per-client credit enrichment ──
+  const allClientIds = allClients.map((c) => c.id);
+
+  const [payStats, cashStats, creditRows, portfolioRow] = await Promise.all([
+    // Payment totals for today
+    query(
+      `SELECT
+         COALESCE(SUM(p.amount), 0)::float8 AS paid_today,
+         COUNT(p.id)::int AS paid_count,
+         COALESCE(SUM(CASE WHEN p.method = 'cash' THEN p.amount ELSE 0 END), 0)::float8 AS cash_collected,
+         COALESCE(SUM(CASE WHEN p.method IS DISTINCT FROM 'cash' AND p.method IS NOT NULL THEN p.amount ELSE 0 END), 0)::float8 AS transfer_collected
+       FROM payments p
+       WHERE p.admin_id = $1 AND p.vendor_id = $2
+         AND p.paid_at >= ($3::date)::timestamp
+         AND p.paid_at <  (($3::date + 1)::timestamp)`,
+      [adminId, vendorId, d]
+    ),
+    // Cash movements income / expenses
+    query(
+      `SELECT
+         COALESCE(SUM(CASE WHEN movement_type='income'  THEN amount ELSE 0 END), 0)::float8 AS income,
+         COALESCE(SUM(CASE WHEN movement_type='expense' THEN amount ELSE 0 END), 0)::float8 AS expenses
+       FROM vendor_cash_movements
+       WHERE admin_id = $1 AND vendor_id = $2
+         AND occurred_at::date = $3::date
+         AND deleted_at IS NULL`,
+      [adminId, vendorId, d]
+    ),
+    // Per-client: most relevant active credit + today's payment
+    allClientIds.length > 0
+      ? query(
+          `SELECT DISTINCT ON (cr.client_id)
+             cr.client_id,
+             cr.id AS credit_id,
+             cr.payment_frequency AS frequency,
+             cr.balance_amount::float8 AS credit_balance,
+             COALESCE(cr.total_amount, cr.principal_amount, 0)::float8 AS credit_total,
+             (
+               SELECT COUNT(*)::int FROM installments i2
+               WHERE i2.credit_id = cr.id AND i2.status IN ('pending','late')
+             ) AS remaining_installments,
+             pay.amount::float8 AS amount_paid,
+             pay.method AS payment_method,
+             pay.paid_at,
+             (pay.id IS NULL) AS no_payment
+           FROM credits cr
+           LEFT JOIN LATERAL (
+             SELECT id, amount, method, paid_at
+             FROM payments pp
+             WHERE pp.credit_id = cr.id
+               AND pp.paid_at >= ($3::date)::timestamp
+               AND pp.paid_at <  (($3::date + 1)::timestamp)
+             ORDER BY pp.paid_at DESC LIMIT 1
+           ) pay ON true
+           WHERE cr.admin_id = $1
+             AND cr.client_id = ANY($2::uuid[])
+             AND cr.deleted_at IS NULL
+             AND cr.status IN ('active','late')
+           ORDER BY cr.client_id, pay.paid_at DESC NULLS LAST, cr.created_at DESC`,
+          [adminId, allClientIds, d]
+        )
+      : Promise.resolve({ rows: [] }),
+    // Vendor portfolio total (initial portfolio)
+    query(
+      `SELECT COALESCE(SUM(cr.balance_amount), 0)::float8 AS initial_portfolio
+       FROM credits cr
+       JOIN clients c ON c.id = cr.client_id
+       WHERE cr.admin_id = $1
+         AND (cr.vendor_id = $2 OR c.vendor_id = $2)
+         AND cr.deleted_at IS NULL
+         AND cr.status IN ('active','late')`,
+      [adminId, vendorId]
+    ),
+  ]);
+
+  // Build lookup map: client_id → credit+payment info
+  const creditMap = {};
+  for (const row of creditRows.rows) {
+    creditMap[row.client_id] = row;
+  }
+
+  // Enrich each client with credit and payment data
+  const enrichedClients = allClients.map((c) => {
+    const cr = creditMap[c.id] || {};
+    return {
+      ...c,
+      credit_id:              cr.credit_id              || null,
+      consecutivo:            cr.credit_id              || c.id,
+      frequency:              cr.frequency              || null,
+      credit_balance:         cr.credit_balance         ?? null,
+      credit_total:           cr.credit_total           ?? null,
+      remaining_installments: cr.remaining_installments ?? null,
+      amount_paid:            cr.amount_paid            ?? null,
+      payment_method:         cr.payment_method         || null,
+      paid_at:                cr.paid_at ? new Date(cr.paid_at).toISOString() : null,
+      no_payment:             !cr.credit_id ? true : !!cr.no_payment,
+    };
+  });
+
+  const ps = payStats.rows[0]    || {};
+  const cs = cashStats.rows[0]   || {};
+  const pr = portfolioRow.rows[0] || {};
+
+  const paidCount   = parseInt(ps.paid_count) || 0;
+  const noPaidCount = Math.max(0, allClients.length - paidCount);
+
+  const enrichedTotals = {
+    ...baseTotals,
+    paid_today:        Number(ps.paid_today)        || 0,
+    paid_count:        paidCount,
+    no_paid_count:     noPaidCount,
+    cash_collected:    Number(ps.cash_collected)    || 0,
+    transfer_collected:Number(ps.transfer_collected)|| 0,
+  };
+
+  const startTime = assignment?.created_at ? new Date(assignment.created_at).toISOString() : null;
+  const closeTime = assignment?.status === 'completed' && assignment?.updated_at
+    ? new Date(assignment.updated_at).toISOString()
+    : null;
+
+  const initialPortfolio = Number(pr.initial_portfolio) || 0;
+
+  return {
+    assignment,
+    totals:   enrichedTotals,
+    clients:  enrichedClients,
+    // LiqDiaria root fields
+    start_time:        startTime,
+    close_time:        closeTime,
+    total_clients:     allClients.length,
+    initial_clients:   allClients.length,
+    synced_clients:    allClients.length,
+    initial_portfolio: initialPortfolio,
+    income:            Number(cs.income)   || 0,
+    expenses:          Number(cs.expenses) || 0,
+    withdrawals:       0,
+    // Placeholder fields (require additional schema tracking)
+    new_clients:       0,
+    renewed_clients:   0,
+    deferred_next_day: 0,
+    cancelled_clients: 0,
+    initial_cash:      0,
+    final_cash:        0,
+    final_portfolio:   initialPortfolio,
+    sales:             0,
+    sales_interest:    0,
+    penalty:           0,
+  };
 }
 
 // ===== Vendor: marcar visita =====
