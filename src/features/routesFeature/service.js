@@ -435,13 +435,14 @@ async function getRouteDay(adminId, vendorId, dateStr) {
 
   // Clientes diferidos
   const deferredRes = await query(
-    `SELECT DISTINCT
+    `SELECT
        c.id, c.name, c.phone, c.address,
        999999 AS visit_order,
        false AS visited, NULL AS visit_note, NULL AS visited_at,
        COALESCE(SUM(CASE WHEN i.due_date = $3::date THEN GREATEST(i.amount_due - i.amount_paid, 0) ELSE 0 END),0)::float8 AS due_today,
        COALESCE(SUM(CASE WHEN i.due_date < $3::date  THEN GREATEST(i.amount_due - i.amount_paid, 0) ELSE 0 END),0)::float8 AS due_overdue,
        COALESCE(SUM(CASE WHEN i.due_date <= $3::date THEN GREATEST(i.amount_due - i.amount_paid, 0) ELSE 0 END),0)::float8 AS due_total,
+       BOOL_OR(cr.payment_frequency = 'weekly') AS has_weekly_credits,
        true AS deferred
      FROM vendor_deferred_clients vdc
      JOIN clients c ON c.id = vdc.client_id AND c.admin_id = $2 AND c.deleted_at IS NULL

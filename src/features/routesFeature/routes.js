@@ -173,7 +173,7 @@ routesFeatureRoutes.post(
   })
 );
 
-// VENDOR: close day (mark route assignment as completed)
+// VENDOR: close day (mark route assignment as completed + auto no-pago for unvisited)
 routesFeatureRoutes.post(
   "/vendors/:vendorId/route-day/close",
   roleGuard("vendor"),
@@ -182,18 +182,63 @@ routesFeatureRoutes.post(
       return res.status(403).json({ ok: false, error: { code: "FORBIDDEN", message: "No autorizado" } });
     }
     const dateStr = req.body?.date || new Date().toISOString().slice(0, 10);
-    const { query: dbQuery } = require("../../db/pool");
-    const r = await dbQuery(
-      `UPDATE route_assignments
-       SET status = 'completed', updated_at = now()
-       WHERE vendor_id = $1 AND admin_id = $2
-         AND assigned_date = $3::date
-         AND status = 'assigned'
-         AND deleted_at IS NULL
-       RETURNING id, status, assigned_date`,
-      [req.auth.vendorId, req.auth.adminId, dateStr]
-    );
-    return res.json({ ok: true, data: r.rows[0] || { already_closed: true, date: dateStr } });
+    const { pool } = require("../../db/pool");
+
+    // Find active assignment
+    const db = await pool.connect();
+    try {
+      await db.query("BEGIN");
+
+      const assignRes = await db.query(
+        `SELECT id, route_id FROM route_assignments
+         WHERE vendor_id = $1 AND admin_id = $2
+           AND assigned_date = $3::date
+           AND status = 'assigned'
+           AND deleted_at IS NULL
+         LIMIT 1`,
+        [req.auth.vendorId, req.auth.adminId, dateStr]
+      );
+
+      const assignment = assignRes.rows[0];
+      if (!assignment) {
+        await db.query("COMMIT");
+        return res.json({ ok: true, data: { already_closed: true, date: dateStr } });
+      }
+
+      // Auto no-pago: insert route_visits for all unvisited clients in the route
+      await db.query(
+        `INSERT INTO route_visits (admin_id, route_assignment_id, client_id, visited, note)
+         SELECT $1, $2, rc.client_id, false, 'Sin pago — cierre de día'
+         FROM route_clients rc
+         WHERE rc.route_id = $3
+           AND rc.is_active = true
+           AND rc.deleted_at IS NULL
+           AND NOT EXISTS (
+             SELECT 1 FROM route_visits rv
+             WHERE rv.route_assignment_id = $2
+               AND rv.client_id = rc.client_id
+           )
+         ON CONFLICT (route_assignment_id, client_id) DO NOTHING`,
+        [req.auth.adminId, assignment.id, assignment.route_id]
+      );
+
+      // Mark assignment completed
+      const r = await db.query(
+        `UPDATE route_assignments
+         SET status = 'completed', updated_at = now()
+         WHERE id = $1
+         RETURNING id, status, assigned_date`,
+        [assignment.id]
+      );
+
+      await db.query("COMMIT");
+      return res.json({ ok: true, data: r.rows[0] });
+    } catch (e) {
+      await db.query("ROLLBACK");
+      throw e;
+    } finally {
+      db.release();
+    }
   })
 );
 
