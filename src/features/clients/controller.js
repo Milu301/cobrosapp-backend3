@@ -25,73 +25,42 @@ async function getOne(req, res) {
   const client = await service.getClientById(clientId);
   if (!client || client.deleted_at) throw new AppError(404, "NOT_FOUND", "Cliente no encontrado");
 
-  // Siempre validar admin
   if (client.admin_id !== req.auth.adminId) throw new AppError(403, "FORBIDDEN", "Cliente no pertenece a tu admin");
 
   if (req.auth.role === "vendor") {
-    // ✅ Ahora: también deja si está en una ruta asignada o si tiene créditos del vendor
     const can = await service.vendorCanAccessClient(req.auth.adminId, req.auth.vendorId, clientId);
     if (!can) throw new AppError(403, "FORBIDDEN", "No asignado a este vendor");
   }
 
-  // ✅ Enviar créditos + pagos para que Flutter los pinte
   const credits = await service.listClientCredits(clientId);
-
   return ok(res, { client, credits });
 }
 
 async function adminCreate(req, res) {
   requireAdminParamMatch(req);
-
   const { vendor_id, name, phone, doc_id, address, notes, status } = req.body;
-
   if (vendor_id) await service.assertVendorBelongsToAdmin(vendor_id, req.auth.adminId);
 
   const created = await service.createClient({
     adminId: req.auth.adminId,
     vendorId: vendor_id || null,
-    name,
-    phone,
-    doc_id,
-    address,
-    notes,
-    status
+    name, phone, doc_id, address, notes, status
   });
-
   return ok(res, created);
 }
 
-/**
- * =====================================================
- * ✅ NUEVO (NO rompe nada): vendorCreate
- * Se usa para: POST /vendors/:vendorId/clients
- * Arregla: controller.vendorCreate is not a function
- * =====================================================
- */
 async function vendorCreate(req, res) {
-  // validar que el vendor del token sea el mismo del param
   if (req.params.vendorId !== req.auth.vendorId) {
     throw new AppError(403, "FORBIDDEN", "vendorId mismatch");
   }
-
-  // ✅ opcional pero recomendado: validar que vendor pertenece al admin
-  // (si tu service lo tiene, aquí ya lo estabas usando en adminCreate)
   await service.assertVendorBelongsToAdmin(req.auth.vendorId, req.auth.adminId);
 
-  // NO dejamos que el vendor “inyecte” otro vendor_id
   const { name, phone, doc_id, address, notes, status } = req.body;
-
   const created = await service.createClient({
     adminId: req.auth.adminId,
     vendorId: req.auth.vendorId,
-    name,
-    phone,
-    doc_id,
-    address,
-    notes,
-    status
+    name, phone, doc_id, address, notes, status
   });
-
   return ok(res, created);
 }
 
@@ -102,8 +71,13 @@ async function update(req, res) {
   if (client.admin_id !== req.auth.adminId) throw new AppError(403, "FORBIDDEN", "Cliente no pertenece a tu admin");
 
   if (req.auth.role === "vendor") {
-    // Mantengo esto estricto: vendor solo edita si está asignado directo por vendor_id
     if (client.vendor_id !== req.auth.vendorId) throw new AppError(403, "FORBIDDEN", "No asignado a este vendor");
+    // Vendors can only edit clients they created within the last 24 hours
+    const createdAt = new Date(client.created_at).getTime();
+    const hoursSinceCreation = (Date.now() - createdAt) / (1000 * 60 * 60);
+    if (hoursSinceCreation > 24) {
+      throw new AppError(403, "FORBIDDEN", "Solo el administrador puede editar clientes con más de 24h de creación");
+    }
   }
 
   if (req.body.vendor_id) await service.assertVendorBelongsToAdmin(req.body.vendor_id, req.auth.adminId);
@@ -127,15 +101,4 @@ async function remove(req, res) {
   return ok(res, deleted);
 }
 
-module.exports = {
-  adminList,
-  vendorList,
-  getOne,
-  adminCreate,
-
-  // ✅ EXPORT NUEVO (clave para que deje de fallar)
-  vendorCreate,
-
-  update,
-  remove
-};
+module.exports = { adminList, vendorList, getOne, adminCreate, vendorCreate, update, remove };

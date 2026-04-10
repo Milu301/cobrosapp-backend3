@@ -341,7 +341,8 @@ async function getRouteDay(adminId, vendorId, dateStr) {
 
        COALESCE(SUM(CASE WHEN i.due_date = $4::date THEN GREATEST(i.amount_due - i.amount_paid, 0) ELSE 0 END),0)::float8 AS due_today,
        COALESCE(SUM(CASE WHEN i.due_date < $4::date THEN GREATEST(i.amount_due - i.amount_paid, 0) ELSE 0 END),0)::float8 AS due_overdue,
-       COALESCE(SUM(CASE WHEN i.due_date <= $4::date THEN GREATEST(i.amount_due - i.amount_paid, 0) ELSE 0 END),0)::float8 AS due_total
+       COALESCE(SUM(CASE WHEN i.due_date <= $4::date THEN GREATEST(i.amount_due - i.amount_paid, 0) ELSE 0 END),0)::float8 AS due_total,
+       BOOL_OR(cr.payment_frequency = 'weekly') AS has_weekly_credits
 
      FROM route_clients rc
      JOIN clients c ON c.id = rc.client_id
@@ -369,6 +370,7 @@ async function getRouteDay(adminId, vendorId, dateStr) {
        c.id, c.name, c.phone, c.address,
        rc.visit_order, lv.visited, lv.note, lv.visited_at
 
+
      ORDER BY rc.visit_order ASC
     `,
     [assignment.assignment_id, assignment.route_id, adminId, d]
@@ -377,9 +379,45 @@ async function getRouteDay(adminId, vendorId, dateStr) {
   const clients = clientsRes.rows.map((row) => ({
     ...row,
     visited_at: row.visited_at ? new Date(row.visited_at).toISOString() : null,
+    deferred: false,
   }));
 
-  const totals = clients.reduce(
+  // Include clients deferred to this date from previous days
+  const deferredRes = await query(
+    `SELECT DISTINCT
+       c.id, c.name, c.phone, c.address,
+       999999 AS visit_order,
+       false AS visited, NULL AS visit_note, NULL AS visited_at,
+       COALESCE(SUM(CASE WHEN i.due_date = $3::date THEN GREATEST(i.amount_due - i.amount_paid, 0) ELSE 0 END),0)::float8 AS due_today,
+       COALESCE(SUM(CASE WHEN i.due_date < $3::date  THEN GREATEST(i.amount_due - i.amount_paid, 0) ELSE 0 END),0)::float8 AS due_overdue,
+       COALESCE(SUM(CASE WHEN i.due_date <= $3::date THEN GREATEST(i.amount_due - i.amount_paid, 0) ELSE 0 END),0)::float8 AS due_total,
+       true AS deferred
+     FROM vendor_deferred_clients vdc
+     JOIN clients c ON c.id = vdc.client_id AND c.admin_id = $2 AND c.deleted_at IS NULL
+     LEFT JOIN credits cr
+       ON cr.client_id = c.id AND cr.admin_id = $2 AND cr.deleted_at IS NULL
+       AND cr.status IN ('active','late') AND cr.balance_amount > 0
+     LEFT JOIN installments i
+       ON i.credit_id = cr.id AND i.status IN ('pending','late')
+       AND (i.amount_due - i.amount_paid) > 0
+     WHERE vdc.vendor_id = $1 AND vdc.admin_id = $2
+       AND vdc.for_date = $3::date AND vdc.deleted_at IS NULL
+     GROUP BY c.id, c.name, c.phone, c.address`,
+    [vendorId, adminId, d]
+  );
+
+  // Merge without duplicates
+  const existingIds = new Set(clients.map((c) => c.id));
+  const deferred = deferredRes.rows
+    .filter((c) => !existingIds.has(c.id))
+    .map((row) => ({
+      ...row,
+      visited_at: null,
+    }));
+
+  const allClients = [...clients, ...deferred];
+
+  const totals = allClients.reduce(
     (acc, c) => {
       acc.due_today += Number(c.due_today || 0);
       acc.due_overdue += Number(c.due_overdue || 0);
@@ -389,7 +427,7 @@ async function getRouteDay(adminId, vendorId, dateStr) {
     { due_today: 0, due_overdue: 0, due_total: 0 }
   );
 
-  return { assignment, totals, clients };
+  return { assignment, totals, clients: allClients };
 }
 
 // ===== Vendor: marcar visita =====

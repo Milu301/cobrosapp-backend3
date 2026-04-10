@@ -9,9 +9,7 @@ function permTrue(permissions, key) {
 
 async function getVendorById(vendorId) {
   const r = await query(
-    `SELECT id, admin_id, status, permissions, deleted_at
-     FROM vendors
-     WHERE id = $1`,
+    `SELECT id, admin_id, status, permissions, deleted_at FROM vendors WHERE id = $1`,
     [vendorId]
   );
   return r.rows[0] || null;
@@ -32,51 +30,32 @@ async function assertVendorActive(vendorId, adminId) {
   return v;
 }
 
-// ✅ vendor puede ver un cliente si:
-// - client.vendor_id == vendor
-// - o está en una ruta asignada a ese vendor
-// - o tiene créditos del vendor
 async function vendorCanAccessClient(adminId, vendorId, clientId) {
-  // asignado directo
   const direct = await query(
-    `SELECT 1
-     FROM clients
-     WHERE id = $1 AND admin_id = $2 AND vendor_id = $3 AND deleted_at IS NULL
-     LIMIT 1`,
+    `SELECT 1 FROM clients
+     WHERE id=$1 AND admin_id=$2 AND vendor_id=$3 AND deleted_at IS NULL LIMIT 1`,
     [clientId, adminId, vendorId]
   );
   if (direct.rows[0]) return true;
 
-  // en ruta asignada
   const inRoute = await query(
-    `
-    SELECT 1
-    FROM route_assignments ra
-    JOIN routes rt ON rt.id = ra.route_id
-    JOIN route_clients rc ON rc.route_id = ra.route_id
-    WHERE ra.admin_id = $1
-      AND ra.vendor_id = $2
-      AND ra.deleted_at IS NULL
-      AND ra.status IN ('assigned','completed')
-      AND rt.deleted_at IS NULL
-      AND rc.deleted_at IS NULL
-      AND rc.is_active = true
-      AND rc.client_id = $3
-    LIMIT 1
-    `,
+    `SELECT 1
+     FROM route_assignments ra
+     JOIN routes rt ON rt.id = ra.route_id
+     JOIN route_clients rc ON rc.route_id = ra.route_id
+     WHERE ra.admin_id=$1 AND ra.vendor_id=$2 AND ra.deleted_at IS NULL
+       AND ra.status IN ('assigned','completed')
+       AND rt.deleted_at IS NULL
+       AND rc.deleted_at IS NULL AND rc.is_active=true
+       AND rc.client_id=$3
+     LIMIT 1`,
     [adminId, vendorId, clientId]
   );
   if (inRoute.rows[0]) return true;
 
-  // créditos asignados al vendor
   const hasCredit = await query(
-    `SELECT 1
-     FROM credits
-     WHERE admin_id = $1
-       AND client_id = $2
-       AND vendor_id = $3
-       AND deleted_at IS NULL
-     LIMIT 1`,
+    `SELECT 1 FROM credits
+     WHERE admin_id=$1 AND client_id=$2 AND vendor_id=$3 AND deleted_at IS NULL LIMIT 1`,
     [adminId, clientId, vendorId]
   );
   return !!hasCredit.rows[0];
@@ -90,25 +69,14 @@ async function listAdminClients(adminId, { q, status, vendor_id, limit, offset }
   const params = [adminId];
   let idx = 1;
 
-  if (status) {
-    params.push(status);
-    where.push(`status = $${++idx}`);
-  }
-
-  if (vendor_id) {
-    params.push(vendor_id);
-    where.push(`vendor_id = $${++idx}`);
-  }
-
+  if (status) { params.push(status); where.push(`status = $${++idx}`); }
+  if (vendor_id) { params.push(vendor_id); where.push(`vendor_id = $${++idx}`); }
   if (q && q.trim() !== "") {
     params.push(`%${q.trim()}%`);
-    where.push(
-      `(name ILIKE $${++idx} OR phone ILIKE $${idx} OR doc_id ILIKE $${idx} OR address ILIKE $${idx} OR notes ILIKE $${idx})`
-    );
+    where.push(`(name ILIKE $${++idx} OR phone ILIKE $${idx} OR doc_id ILIKE $${idx} OR address ILIKE $${idx} OR notes ILIKE $${idx})`);
   }
 
-  params.push(lim);
-  params.push(off);
+  params.push(lim, off);
 
   const itemsRes = await query(
     `SELECT id, admin_id, vendor_id, name, phone, doc_id, address, notes, status, created_at, updated_at
@@ -120,9 +88,7 @@ async function listAdminClients(adminId, { q, status, vendor_id, limit, offset }
   );
 
   const totalRes = await query(
-    `SELECT COUNT(*)::int AS total
-     FROM clients
-     WHERE ${where.join(" AND ")}`,
+    `SELECT COUNT(*)::int AS total FROM clients WHERE ${where.join(" AND ")}`,
     params.slice(0, idx)
   );
 
@@ -137,20 +103,13 @@ async function listVendorClients(adminId, vendorId, { q, status, limit, offset }
   const params = [adminId, vendorId];
   let idx = 2;
 
-  if (status) {
-    params.push(status);
-    where.push(`status = $${++idx}`);
-  }
-
+  if (status) { params.push(status); where.push(`status = $${++idx}`); }
   if (q && q.trim() !== "") {
     params.push(`%${q.trim()}%`);
-    where.push(
-      `(name ILIKE $${++idx} OR phone ILIKE $${idx} OR doc_id ILIKE $${idx} OR address ILIKE $${idx} OR notes ILIKE $${idx})`
-    );
+    where.push(`(name ILIKE $${++idx} OR phone ILIKE $${idx} OR doc_id ILIKE $${idx} OR address ILIKE $${idx} OR notes ILIKE $${idx})`);
   }
 
-  params.push(lim);
-  params.push(off);
+  params.push(lim, off);
 
   const itemsRes = await query(
     `SELECT id, admin_id, vendor_id, name, phone, doc_id, address, notes, status, created_at, updated_at
@@ -162,9 +121,7 @@ async function listVendorClients(adminId, vendorId, { q, status, limit, offset }
   );
 
   const totalRes = await query(
-    `SELECT COUNT(*)::int AS total
-     FROM clients
-     WHERE ${where.join(" AND ")}`,
+    `SELECT COUNT(*)::int AS total FROM clients WHERE ${where.join(" AND ")}`,
     params.slice(0, idx)
   );
 
@@ -174,14 +131,12 @@ async function listVendorClients(adminId, vendorId, { q, status, limit, offset }
 async function getClientById(clientId) {
   const r = await query(
     `SELECT id, admin_id, vendor_id, name, phone, doc_id, address, notes, status, deleted_at, created_at, updated_at
-     FROM clients
-     WHERE id = $1`,
+     FROM clients WHERE id = $1`,
     [clientId]
   );
   return r.rows[0] || null;
 }
 
-// ✅ créditos + pagos para detalle
 async function listClientCredits(clientId) {
   const r = await query(
     `SELECT
@@ -189,28 +144,25 @@ async function listClientCredits(clientId) {
         c.admin_id,
         c.client_id,
         c.vendor_id,
-        c.principal_amount::float8 AS principal_amount,
-        c.interest_rate::float8 AS interest_rate,
+        c.principal_amount::float8,
+        c.interest_rate::float8,
         c.installments_count,
         c.start_date,
         c.status,
-        c.total_amount::float8 AS total_amount,
-        c.balance::float8 AS balance,
-        c.balance_amount::float8 AS balance_amount,
+        c.total_amount::float8,
+        c.balance::float8,
+        c.balance_amount::float8,
         c.currency_code,
         c.notes,
         c.created_at,
         c.updated_at,
-        COALESCE(p.payments, '[]'::json) AS payments
+        COALESCE(p.payments, '[]'::json) AS payments,
+        COALESCE(inst.installments, '[]'::json) AS installments
       FROM credits c
       LEFT JOIN LATERAL (
         SELECT json_agg(
           json_build_object(
-            'id', p.id,
-            'admin_id', p.admin_id,
-            'credit_id', p.credit_id,
-            'vendor_id', p.vendor_id,
-            'amount', (p.amount::float8),
+            'amount', p.amount::float8,
             'method', p.method,
             'note', p.note,
             'paid_at', p.paid_at,
@@ -221,6 +173,21 @@ async function listClientCredits(clientId) {
         FROM payments p
         WHERE p.credit_id = c.id
       ) p ON true
+      LEFT JOIN LATERAL (
+        SELECT json_agg(
+          json_build_object(
+            'installment_number', i.installment_number,
+            'due_date', i.due_date,
+            'amount_due', i.amount_due::float8,
+            'amount_paid', i.amount_paid::float8,
+            'status', i.status,
+            'paid_at', i.paid_at
+          )
+          ORDER BY i.installment_number ASC
+        ) AS installments
+        FROM installments i
+        WHERE i.credit_id = c.id
+      ) inst ON true
       WHERE c.client_id = $1
         AND c.deleted_at IS NULL
       ORDER BY c.created_at DESC`,
@@ -254,14 +221,12 @@ async function updateClient(clientId, adminId, patch) {
 
   if (!sets.length) throw new AppError(400, "VALIDATION_ERROR", "Nada para actualizar");
 
-  params.push(clientId);
-  params.push(adminId);
+  params.push(clientId, adminId);
 
   const r = await query(
     `UPDATE clients
-     SET ${sets.join(", ")},
-         updated_at = now()
-     WHERE id = $${++i} AND admin_id = $${++i} AND deleted_at IS NULL
+     SET ${sets.join(", ")}, updated_at=now()
+     WHERE id=$${++i} AND admin_id=$${++i} AND deleted_at IS NULL
      RETURNING id, admin_id, vendor_id, name, phone, doc_id, address, notes, status, created_at, updated_at`,
     params
   );
@@ -272,8 +237,8 @@ async function updateClient(clientId, adminId, patch) {
 async function softDeleteClient(clientId, adminId) {
   const r = await query(
     `UPDATE clients
-     SET deleted_at = now(), status = 'inactive', updated_at = now()
-     WHERE id = $1 AND admin_id = $2 AND deleted_at IS NULL
+     SET deleted_at=now(), status='inactive', updated_at=now()
+     WHERE id=$1 AND admin_id=$2 AND deleted_at IS NULL
      RETURNING id`,
     [clientId, adminId]
   );
@@ -286,12 +251,10 @@ module.exports = {
   assertVendorBelongsToAdmin,
   assertVendorActive,
   vendorCanAccessClient,
-
   listAdminClients,
   listVendorClients,
   getClientById,
   listClientCredits,
-
   createClient,
   updateClient,
   softDeleteClient,

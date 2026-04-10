@@ -1,4 +1,4 @@
-﻿const express = require("express");
+const express = require("express");
 const { asyncHandler } = require("../../utils/asyncHandler");
 const { roleGuard } = require("../../middlewares/roleGuard");
 const { createCreditSchema, createPaymentSchema } = require("./schema");
@@ -6,10 +6,12 @@ const controller = require("./controller");
 
 const creditRoutes = express.Router();
 
-/**
- * POST /clients/:clientId/credits
- * POST /credits/:creditId/payments
- */
+creditRoutes.get(
+  "/clients/:clientId/credits",
+  roleGuard("admin", "vendor"),
+  asyncHandler(controller.getCredits)
+);
+
 creditRoutes.post(
   "/clients/:clientId/credits",
   roleGuard("admin", "vendor"),

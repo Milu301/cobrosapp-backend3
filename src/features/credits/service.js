@@ -8,14 +8,29 @@ function round2(n) {
 function addDays(dateStr, days) {
   const d = new Date(dateStr + "T00:00:00.000Z");
   d.setUTCDate(d.getUTCDate() + days);
-  return d.toISOString().slice(0, 10); // YYYY-MM-DD
+  return d.toISOString().slice(0, 10);
+}
+
+function addMonths(dateStr, months) {
+  const d = new Date(dateStr + "T00:00:00.000Z");
+  d.setUTCMonth(d.getUTCMonth() + months);
+  return d.toISOString().slice(0, 10);
+}
+
+function calcDueDate(startDate, installmentIndex, frequency) {
+  // installmentIndex is 0-based (i - 1 from the loop)
+  switch (frequency) {
+    case "interdaily": return addDays(startDate, installmentIndex * 2);
+    case "weekly":     return addDays(startDate, installmentIndex * 7);
+    case "biweekly":   return addDays(startDate, installmentIndex * 14);
+    case "monthly":    return addMonths(startDate, installmentIndex);
+    default:           return addDays(startDate, installmentIndex); // daily
+  }
 }
 
 async function getClientById(clientId) {
   const r = await query(
-    `SELECT id, admin_id, vendor_id, deleted_at
-     FROM clients
-     WHERE id = $1`,
+    `SELECT id, admin_id, vendor_id, deleted_at FROM clients WHERE id = $1`,
     [clientId]
   );
   return r.rows[0] || null;
@@ -23,9 +38,7 @@ async function getClientById(clientId) {
 
 async function getVendorById(vendorId) {
   const r = await query(
-    `SELECT id, admin_id, status, permissions, deleted_at
-     FROM vendors
-     WHERE id = $1`,
+    `SELECT id, admin_id, status, permissions, deleted_at FROM vendors WHERE id = $1`,
     [vendorId]
   );
   return r.rows[0] || null;
@@ -39,24 +52,21 @@ function permTrue(permissions, key) {
 
 async function vendorHasClientInAssignedRoute(adminId, vendorId, clientId) {
   const r = await query(
-    `
-    SELECT 1
-    FROM route_assignments ra
-    JOIN routes rt ON rt.id = ra.route_id
-    JOIN route_clients rc ON rc.route_id = ra.route_id
-    WHERE ra.admin_id = $1
-      AND ra.vendor_id = $2
-      AND ra.deleted_at IS NULL
-      AND ra.status IN ('assigned','completed')
-      AND rt.deleted_at IS NULL
-      AND rc.deleted_at IS NULL
-      AND rc.is_active = true
-      AND rc.client_id = $3
-    LIMIT 1
-    `,
+    `SELECT 1
+     FROM route_assignments ra
+     JOIN routes rt ON rt.id = ra.route_id
+     JOIN route_clients rc ON rc.route_id = ra.route_id
+     WHERE ra.admin_id = $1
+       AND ra.vendor_id = $2
+       AND ra.deleted_at IS NULL
+       AND ra.status IN ('assigned','completed')
+       AND rt.deleted_at IS NULL
+       AND rc.deleted_at IS NULL
+       AND rc.is_active = true
+       AND rc.client_id = $3
+     LIMIT 1`,
     [adminId, vendorId, clientId]
   );
-
   return !!r.rows[0];
 }
 
@@ -70,7 +80,6 @@ async function createCredit(auth, clientId, payload) {
     throw new AppError(400, "VALIDATION_ERROR", "installments_count inválido");
   }
 
-  // Resolver vendor_id
   let vendorId = null;
 
   if (auth.role === "vendor") {
@@ -84,15 +93,11 @@ async function createCredit(auth, clientId, payload) {
 
     vendorId = auth.vendorId;
 
-    // ✅ vendor puede crear crédito si:
-    // - el cliente está asignado directo (client.vendor_id == vendorId)
-    // - O el cliente está en una ruta asignada a este vendor
     if (clientRow.vendor_id !== vendorId) {
       const inRoute = await vendorHasClientInAssignedRoute(auth.adminId, vendorId, clientId);
       if (!inRoute) throw new AppError(403, "FORBIDDEN", "No asignado a este vendor");
     }
   } else {
-    // admin puede asignar vendor_id opcionalmente
     if (payload.vendor_id) {
       const v = await getVendorById(payload.vendor_id);
       if (!v || v.deleted_at) throw new AppError(404, "NOT_FOUND", "Vendor no encontrado");
@@ -107,13 +112,10 @@ async function createCredit(auth, clientId, payload) {
 
   const interestRate = round2(payload.interest_rate || 0);
   const count = Number(payload.installments_count);
-
   const currencyCode = String(payload.currency_code || "COP").toUpperCase();
+  const frequency = payload.payment_frequency || "daily";
 
   const total = round2(principal * (1 + interestRate / 100));
-  const balance = total;
-
-  // distribuir cuotas exactas en centavos
   const centsTotal = Math.round(total * 100);
   const baseCents = Math.floor(centsTotal / count);
   const remainder = centsTotal - baseCents * count;
@@ -126,60 +128,35 @@ async function createCredit(auth, clientId, payload) {
       `INSERT INTO credits
         (admin_id, client_id, vendor_id,
          principal_amount, interest_rate, installments_count, start_date,
-         status, total_amount, balance, balance_amount, currency_code, notes)
+         payment_frequency, status, total_amount, balance, balance_amount, currency_code, notes)
        VALUES
-        ($1,$2,$3,$4,$5,$6,$7,'active',$8,$9,$10,$11,$12)
+        ($1,$2,$3,$4,$5,$6,$7,$8,'active',$9,$10,$11,$12,$13)
        RETURNING
         id, admin_id, client_id, vendor_id,
-        principal_amount::float8 AS principal_amount,
-        interest_rate::float8 AS interest_rate,
-        installments_count,
-        start_date,
-        status,
-        total_amount::float8 AS total_amount,
-        balance::float8 AS balance,
-        balance_amount::float8 AS balance_amount,
-        currency_code,
-        notes,
-        created_at, updated_at`,
-      [
-        auth.adminId,
-        clientId,
-        vendorId,
-        principal,
-        interestRate,
-        count,
-        payload.start_date,
-        total,
-        balance,
-        balance,
-        currencyCode,
-        payload.notes || null
-      ]
+        principal_amount::float8, interest_rate::float8,
+        installments_count, start_date, payment_frequency, status,
+        total_amount::float8, balance::float8, balance_amount::float8,
+        currency_code, notes, created_at, updated_at`,
+      [auth.adminId, clientId, vendorId, principal, interestRate, count,
+       payload.start_date, frequency, total, total, total, currencyCode, payload.notes || null]
     );
 
     const credit = cr.rows[0];
 
     for (let i = 1; i <= count; i++) {
-      let cents = baseCents;
-      if (i === count) cents = baseCents + remainder;
+      const cents = i === count ? baseCents + remainder : baseCents;
       const amountDue = cents / 100;
-      const dueDate = addDays(payload.start_date, i - 1);
-
+      const dueDate = calcDueDate(payload.start_date, i - 1, frequency);
       await client.query(
-        `INSERT INTO installments
-          (credit_id, installment_number, due_date, amount_due, amount_paid, status)
-         VALUES
-          ($1,$2,$3,$4,0,'pending')`,
+        `INSERT INTO installments (credit_id, installment_number, due_date, amount_due, amount_paid, status)
+         VALUES ($1,$2,$3,$4,0,'pending')`,
         [credit.id, i, dueDate, amountDue]
       );
     }
 
-    // ✅ Caja automática: egreso por préstamo (principal)
-    const note = `Desembolso crédito ${credit.id} (cliente ${clientId})`;
     const occurredAt = new Date(payload.start_date + "T00:00:00.000Z");
+    const disbNote = `Desembolso crédito (cliente ${clientId})`;
 
-    // Admin egreso
     await client.query(
       `INSERT INTO admin_cash_movements
         (admin_id, movement_type, category, amount, occurred_at, reference_type, reference_id, note)
@@ -188,10 +165,9 @@ async function createCredit(auth, clientId, payload) {
          SELECT 1 FROM admin_cash_movements
          WHERE admin_id=$1 AND reference_type='credit' AND reference_id=$4 AND deleted_at IS NULL
        )`,
-      [auth.adminId, principal, occurredAt, credit.id, note]
+      [auth.adminId, principal, occurredAt, credit.id, disbNote]
     );
 
-    // Vendor egreso (si el crédito quedó asignado a vendor)
     if (vendorId) {
       await client.query(
         `INSERT INTO vendor_cash_movements
@@ -201,7 +177,7 @@ async function createCredit(auth, clientId, payload) {
            SELECT 1 FROM vendor_cash_movements
            WHERE admin_id=$1 AND vendor_id=$2 AND reference_type='credit' AND reference_id=$5 AND deleted_at IS NULL
          )`,
-        [auth.adminId, vendorId, principal, occurredAt, credit.id, note]
+        [auth.adminId, vendorId, principal, occurredAt, credit.id, disbNote]
       );
     }
 
@@ -220,7 +196,6 @@ async function createPayment(auth, creditId, payload) {
   try {
     await client.query("BEGIN");
 
-    // ✅ Traemos client_id para validar ruta también
     const cr = await client.query(
       `SELECT id, admin_id, vendor_id, client_id, status,
               balance_amount::float8 AS balance_amount
@@ -239,9 +214,6 @@ async function createPayment(auth, creditId, payload) {
       if (v.admin_id !== auth.adminId) throw new AppError(403, "FORBIDDEN", "Vendor no pertenece a tu admin");
       if (String(v.status || "").toLowerCase() !== "active") throw new AppError(403, "FORBIDDEN", "Vendor inactivo");
 
-      // ✅ vendor puede pagar si:
-      // - el crédito está asignado a él
-      // - O el cliente está en una ruta asignada a él
       const inRoute = await vendorHasClientInAssignedRoute(auth.adminId, auth.vendorId, credit.client_id);
       if (credit.vendor_id !== auth.vendorId && !inRoute) {
         throw new AppError(403, "FORBIDDEN", "No asignado a este vendor");
@@ -262,36 +234,20 @@ async function createPayment(auth, creditId, payload) {
     const pr = await client.query(
       `INSERT INTO payments
         (admin_id, credit_id, vendor_id, amount, method, note, paid_at)
-       VALUES
-        ($1,$2,$3,$4,$5,$6,COALESCE($7, now()))
-       RETURNING
-        id,
-        admin_id,
-        credit_id,
-        vendor_id,
-        amount::float8 AS amount,
-        method,
-        note,
-        paid_at,
-        created_at`,
+       VALUES ($1,$2,$3,$4,$5,$6,COALESCE($7, now()))
+       RETURNING id, admin_id, credit_id, vendor_id,
+        amount::float8, method, note, paid_at, created_at`,
       [
-        auth.adminId,
-        creditId,
+        auth.adminId, creditId,
         auth.role === "vendor" ? auth.vendorId : null,
-        amount,
-        payload.method || "cash",
-        payload.note || null,
-        payload.paid_at || null
+        amount, payload.method || "cash", payload.note || null, payload.paid_at || null
       ]
     );
 
     const payment = pr.rows[0];
-
-    // ✅ Caja automática: ingreso por pago (admin + vendor)
     const payAt = payment.paid_at ? new Date(payment.paid_at) : new Date();
-    const notePay = `Pago ${payment.id} (crédito ${creditId})`;
+    const payNote = `Pago recibido (crédito)`;
 
-    // Admin ingreso (siempre)
     await client.query(
       `INSERT INTO admin_cash_movements
         (admin_id, movement_type, category, amount, occurred_at, reference_type, reference_id, note)
@@ -300,17 +256,11 @@ async function createPayment(auth, creditId, payload) {
          SELECT 1 FROM admin_cash_movements
          WHERE admin_id=$1 AND reference_type='payment' AND reference_id=$4 AND deleted_at IS NULL
        )`,
-      [auth.adminId, amount, payAt, payment.id, notePay]
+      [auth.adminId, amount, payAt, payment.id, payNote]
     );
 
-    // Vendor ingreso:
-    // - Si el pago lo registra un vendor -> payment.vendor_id
-    // - Si lo registra el admin -> lo imputamos al vendor del crédito (si existe)
     const vendorCashVendorId = payment.vendor_id || credit.vendor_id || null;
-
     if (vendorCashVendorId) {
-      const notePayVendor = `Pago ${payment.id} (crédito ${creditId}) vendor ${vendorCashVendorId}`;
-
       await client.query(
         `INSERT INTO vendor_cash_movements
           (admin_id, vendor_id, movement_type, category, amount, occurred_at, reference_type, reference_id, note)
@@ -319,13 +269,12 @@ async function createPayment(auth, creditId, payload) {
            SELECT 1 FROM vendor_cash_movements
            WHERE admin_id=$1 AND vendor_id=$2 AND reference_type='payment' AND reference_id=$5 AND deleted_at IS NULL
          )`,
-        [auth.adminId, vendorCashVendorId, amount, payAt, payment.id, notePayVendor]
+        [auth.adminId, vendorCashVendorId, amount, payAt, payment.id, payNote]
       );
     }
 
-    // FIFO a cuotas
     const instRes = await client.query(
-      `SELECT id, installment_number, amount_due::float8 AS amount_due, amount_paid::float8 AS amount_paid, status, due_date
+      `SELECT id, installment_number, amount_due::float8, amount_paid::float8, status, due_date
        FROM installments
        WHERE credit_id = $1
        ORDER BY installment_number ASC`,
@@ -333,10 +282,8 @@ async function createPayment(auth, creditId, payload) {
     );
 
     let remainingCents = payCents;
-
     for (const inst of instRes.rows) {
       if (remainingCents <= 0) break;
-
       const dueCents = Math.round(Number(inst.amount_due) * 100);
       const paidCents = Math.round(Number(inst.amount_paid) * 100);
       const need = dueCents - paidCents;
@@ -344,23 +291,14 @@ async function createPayment(auth, creditId, payload) {
 
       const payToThis = Math.min(need, remainingCents);
       const newPaidCents = paidCents + payToThis;
-
       const fullyPaid = newPaidCents >= dueCents;
-
       const dueDate = new Date(inst.due_date + "T00:00:00.000Z");
       const today = new Date();
-      const isPastDue =
-        dueDate.getTime() <
-        new Date(today.toISOString().slice(0, 10) + "T00:00:00.000Z").getTime();
-
+      const isPastDue = dueDate.getTime() < new Date(today.toISOString().slice(0, 10) + "T00:00:00.000Z").getTime();
       const newStatus = fullyPaid ? (isPastDue ? "paid_late" : "paid") : isPastDue ? "late" : "pending";
 
       await client.query(
-        `UPDATE installments
-         SET amount_paid = $2,
-             status = $3,
-             updated_at = now()
-         WHERE id = $1`,
+        `UPDATE installments SET amount_paid=$2, status=$3, updated_at=now() WHERE id=$1`,
         [inst.id, newPaidCents / 100, newStatus]
       );
 
@@ -373,11 +311,10 @@ async function createPayment(auth, creditId, payload) {
 
     await client.query(
       `UPDATE credits
-       SET balance_amount = $2,
-           balance = $2,
+       SET balance_amount=$2, balance=$2,
            status = CASE WHEN $3 THEN 'paid' ELSE status END,
-           updated_at = now()
-       WHERE id = $1`,
+           updated_at=now()
+       WHERE id=$1`,
       [creditId, finalBalance, paidOff]
     );
 
@@ -385,7 +322,7 @@ async function createPayment(auth, creditId, payload) {
 
     return {
       payment,
-      credit: { id: creditId, balance_amount: finalBalance, status: paidOff ? "paid" : credit.status }
+      credit: { balance_amount: finalBalance, status: paidOff ? "paid" : credit.status }
     };
   } catch (e) {
     await client.query("ROLLBACK");
@@ -395,4 +332,37 @@ async function createPayment(auth, creditId, payload) {
   }
 }
 
-module.exports = { createCredit, createPayment };
+async function listClientCredits(auth, clientId) {
+  const clientRow = await getClientById(clientId);
+  if (!clientRow || clientRow.deleted_at) throw new AppError(404, "NOT_FOUND", "Cliente no encontrado");
+  if (clientRow.admin_id !== auth.adminId) throw new AppError(403, "FORBIDDEN", "Cliente no pertenece a tu admin");
+
+  const r = await query(
+    `SELECT
+       c.id, c.admin_id, c.client_id, c.vendor_id,
+       c.principal_amount::float8, c.interest_rate::float8,
+       c.installments_count, c.start_date, c.payment_frequency, c.status,
+       c.total_amount::float8, c.balance::float8, c.balance_amount::float8,
+       c.currency_code, c.notes, c.created_at, c.updated_at,
+       v.name AS vendor_name,
+       (
+         SELECT json_agg(i ORDER BY i.installment_number)
+         FROM (
+           SELECT id, installment_number, due_date,
+                  amount_due::float8, amount_paid::float8, status
+           FROM installments
+           WHERE credit_id = c.id
+           ORDER BY installment_number
+         ) i
+       ) AS installments
+     FROM credits c
+     LEFT JOIN vendors v ON v.id = c.vendor_id
+     WHERE c.client_id = $1 AND c.deleted_at IS NULL
+     ORDER BY c.created_at DESC`,
+    [clientId]
+  );
+
+  return r.rows;
+}
+
+module.exports = { createCredit, createPayment, listClientCredits };

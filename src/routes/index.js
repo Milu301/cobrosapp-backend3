@@ -14,6 +14,7 @@ const { creditRoutes } = require("../features/credits/routes");
 const { cashRoutes } = require("../features/cash/routes");
 const { locationRoutes } = require("../features/locations/routes");
 const { reportRoutes } = require("../features/reports/routes");
+const { statsRoutes } = require("../features/stats/routes");
 
 const apiRouter = express.Router();
 
@@ -35,6 +36,7 @@ protectedRouter.use(creditRoutes);
 protectedRouter.use(cashRoutes);
 protectedRouter.use(locationRoutes);
 protectedRouter.use(reportRoutes);
+protectedRouter.use(statsRoutes);
 
 apiRouter.use(protectedRouter);
 

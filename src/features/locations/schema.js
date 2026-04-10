@@ -15,7 +15,7 @@ const locationPostSchema = z.object({
   is_mock: z.coerce.boolean().optional().default(false),
   source: z.string().max(30).optional().default("foreground"),
 
-  recorded_at: z.string().datetime().optional() // ISO opcional
+  recorded_at: z.string().datetime({ offset: true }).optional()
 });
 
 const historyQuerySchema = z.object({

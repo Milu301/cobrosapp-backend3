@@ -12,6 +12,7 @@ const {
   routeVisitCreateSchema
 } = require("./schema");
 const controller = require("./controller");
+const routeService = require("./service");
 
 const routesFeatureRoutes = express.Router();
 
@@ -96,6 +97,21 @@ routesFeatureRoutes.post(
   })
 );
 
+// ADMIN: get vendor route-day (for LiqDiaria page)
+routesFeatureRoutes.get(
+  "/admins/:adminId/vendors/:vendorId/route-day",
+  roleGuard("admin"),
+  asyncHandler(async (req, res) => {
+    if (req.params.adminId !== req.auth.adminId) {
+      return res.status(403).json({ ok: false, error: { code: "FORBIDDEN", message: "adminId no coincide" } });
+    }
+    const dateStr = req.query.date || new Date().toISOString().slice(0, 10);
+    const data = await routeService.getRouteDay(req.auth.adminId, req.params.vendorId, dateStr);
+    if (!data) return res.json({ ok: true, data: { date: dateStr, assignment: null, clients: [] } });
+    return res.json({ ok: true, data: { date: dateStr, ...data } });
+  })
+);
+
 // VENDOR: route-day
 routesFeatureRoutes.get(
   "/vendors/:vendorId/route-day",
@@ -113,6 +129,71 @@ routesFeatureRoutes.post(
   asyncHandler(async (req, res) => {
     req.body = routeVisitCreateSchema.parse(req.body);
     return controller.vendorVisit(req, res);
+  })
+);
+
+// VENDOR: defer client to next day (weekly clients only)
+routesFeatureRoutes.post(
+  "/vendors/:vendorId/defer-client",
+  roleGuard("vendor"),
+  asyncHandler(async (req, res) => {
+    if (req.params.vendorId !== req.auth.vendorId) {
+      return res.status(403).json({ ok: false, error: { code: "FORBIDDEN", message: "No autorizado" } });
+    }
+    const { client_id, for_date, reason } = req.body || {};
+    if (!client_id || !for_date) {
+      return res.status(400).json({ ok: false, error: { code: "VALIDATION_ERROR", message: "client_id y for_date son requeridos" } });
+    }
+    if (!/^\d{4}-\d{2}-\d{2}$/.test(String(for_date))) {
+      return res.status(400).json({ ok: false, error: { code: "VALIDATION_ERROR", message: "for_date debe ser YYYY-MM-DD" } });
+    }
+
+    const { query: dbQuery } = require("../../db/pool");
+
+    // Only allow if client has weekly credits
+    const check = await dbQuery(
+      `SELECT 1 FROM credits
+       WHERE client_id = $1 AND admin_id = $2
+         AND payment_frequency = 'weekly'
+         AND status IN ('active','late') AND deleted_at IS NULL LIMIT 1`,
+      [client_id, req.auth.adminId]
+    );
+    if (!check.rows[0]) {
+      return res.status(400).json({ ok: false, error: { code: "VALIDATION_ERROR", message: "Solo se pueden diferir clientes con créditos semanales" } });
+    }
+
+    const today = new Date().toISOString().slice(0, 10);
+    const r = await dbQuery(
+      `INSERT INTO vendor_deferred_clients (admin_id, vendor_id, client_id, from_date, for_date, reason)
+       VALUES ($1,$2,$3,$4::date,$5::date,$6)
+       RETURNING id, from_date, for_date`,
+      [req.auth.adminId, req.auth.vendorId, client_id, today, for_date, reason || null]
+    );
+    return res.json({ ok: true, data: r.rows[0] || { deferred: true } });
+  })
+);
+
+// VENDOR: close day (mark route assignment as completed)
+routesFeatureRoutes.post(
+  "/vendors/:vendorId/route-day/close",
+  roleGuard("vendor"),
+  asyncHandler(async (req, res) => {
+    if (req.params.vendorId !== req.auth.vendorId) {
+      return res.status(403).json({ ok: false, error: { code: "FORBIDDEN", message: "No autorizado" } });
+    }
+    const dateStr = req.body?.date || new Date().toISOString().slice(0, 10);
+    const { query: dbQuery } = require("../../db/pool");
+    const r = await dbQuery(
+      `UPDATE route_assignments
+       SET status = 'completed', updated_at = now()
+       WHERE vendor_id = $1 AND admin_id = $2
+         AND assigned_date = $3::date
+         AND status = 'assigned'
+         AND deleted_at IS NULL
+       RETURNING id, status, assigned_date`,
+      [req.auth.vendorId, req.auth.adminId, dateStr]
+    );
+    return res.json({ ok: true, data: r.rows[0] || { already_closed: true, date: dateStr } });
   })
 );
 

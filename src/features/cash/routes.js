@@ -1,29 +1,23 @@
-﻿﻿const express = require("express");
+const express = require("express");
 const controller = require("./controller");
 const schema = require("./schema");
 const { validate } = require("../../middlewares/validate");
 const { asyncHandler } = require("../../utils/asyncHandler");
 const { roleGuard } = require("../../middlewares/roleGuard");
 
-// ✅ Fix anti-crash:
 function safeHandler(name) {
   const fn = controller?.[name];
   if (typeof fn === "function") return fn;
-
   return async (req, res) => {
-    return res.status(500).json({
+    return res.status(501).json({
       ok: false,
-      error: {
-        code: "INTERNAL_ERROR",
-        message: `Cash controller handler missing: ${name}`
-      }
+      error: { code: "NOT_IMPLEMENTED", message: "Función no disponible" }
     });
   };
 }
 
 const cashRoutes = express.Router();
 
-// Resumen (admin o vendor)
 cashRoutes.get(
   "/cash/summary",
   roleGuard("admin", "vendor"),
@@ -31,7 +25,6 @@ cashRoutes.get(
   asyncHandler(safeHandler("summary"))
 );
 
-// ✅ Compat: endpoints con params (los usa el Flutter)
 cashRoutes.get(
   "/admins/:adminId/cash/summary",
   roleGuard("admin"),
@@ -46,7 +39,6 @@ cashRoutes.get(
   asyncHandler(safeHandler("vendorCashSummary"))
 );
 
-// Admin: lista movimientos
 cashRoutes.get(
   "/admins/:adminId/cash",
   roleGuard("admin"),
@@ -54,7 +46,6 @@ cashRoutes.get(
   asyncHandler(safeHandler("listAdminCash"))
 );
 
-// Vendor: lista movimientos
 cashRoutes.get(
   "/vendors/:vendorId/cash",
   roleGuard("admin", "vendor"),
@@ -62,7 +53,6 @@ cashRoutes.get(
   asyncHandler(safeHandler("listVendorCash"))
 );
 
-// Admin: crear movimiento
 cashRoutes.post(
   "/admins/:adminId/cash/movements",
   roleGuard("admin"),
@@ -70,7 +60,6 @@ cashRoutes.post(
   asyncHandler(safeHandler("createAdminCashMovement"))
 );
 
-// Vendor: crear movimiento
 cashRoutes.post(
   "/vendors/:vendorId/cash/movements",
   roleGuard("admin", "vendor"),

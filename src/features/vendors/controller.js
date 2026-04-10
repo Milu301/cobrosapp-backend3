@@ -1,8 +1,12 @@
+const crypto = require("crypto");
 const bcrypt = require("bcrypt");
 const { AppError } = require("../../utils/appError");
 const { ok, created } = require("../../utils/response");
 const { auditLog } = require("../../services/audit.service");
-const { listVendors, getVendorById, createVendor, updateVendor, softDeleteVendor } = require("./service");
+const {
+  listVendors, getVendorById, createVendor, updateVendor, softDeleteVendor,
+  resetVendorDevice, forceLogoutVendor, resetVendorPassword
+} = require("./service");
 
 function requireAdminParamMatch(req) {
   if (req.params.adminId !== req.auth.adminId) {
@@ -123,7 +127,6 @@ async function remove(req, res) {
   return ok(res, { id: vendorId, deleted: true });
 }
 async function resetDevice(req, res) {
-  requireAdminParamMatch(req);
   const vendorId = req.params.vendorId;
 
   const row = await resetVendorDevice(vendorId, req.auth.adminId);
@@ -140,7 +143,6 @@ async function resetDevice(req, res) {
 }
 
 async function forceLogout(req, res) {
-  requireAdminParamMatch(req);
   const vendorId = req.params.vendorId;
 
   const row = await forceLogoutVendor(vendorId, req.auth.adminId);
@@ -162,7 +164,6 @@ function generateTempPassword() {
 }
 
 async function resetPassword(req, res) {
-  requireAdminParamMatch(req);
   const vendorId = req.params.vendorId;
 
   const desired = req.body?.password && String(req.body.password).trim().length >= 6

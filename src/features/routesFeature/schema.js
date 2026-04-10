@@ -59,7 +59,7 @@ const routeVisitCreateSchema = z.object({
   client_id: z.string().uuid(),
   visited: z.coerce.boolean(),
   note: z.string().max(1000).optional().nullable(),
-  visited_at: z.string().datetime().optional() // ISO string, opcional
+  visited_at: z.string().datetime({ offset: true }).optional()
 });
 
 module.exports = {
