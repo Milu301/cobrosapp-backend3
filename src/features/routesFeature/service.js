@@ -374,6 +374,8 @@ async function getRouteDay(adminId, vendorId, dateStr) {
          c.id, c.name, c.phone, c.address,
          rc.visit_order, lv.visited, lv.note, lv.visited_at
 
+       HAVING COALESCE(SUM(CASE WHEN i.due_date <= $4::date THEN GREATEST(i.amount_due - i.amount_paid, 0) ELSE 0 END), 0) > 0
+
        ORDER BY rc.visit_order ASC
       `,
       [assignment.assignment_id, assignment.route_id, adminId, d]
@@ -406,7 +408,7 @@ async function getRouteDay(adminId, vendorId, dateStr) {
        AND i.status IN ('pending','late')
        AND (i.amount_due - i.amount_paid) > 0
        AND i.due_date <= $3::date
-     WHERE cr.vendor_id = $2
+     WHERE (cr.vendor_id = $2 OR c.vendor_id = $2)
        AND cr.admin_id = $1
        AND cr.deleted_at IS NULL
        AND cr.status IN ('active','late')
