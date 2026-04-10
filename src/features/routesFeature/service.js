@@ -317,72 +317,121 @@ async function getRouteDay(adminId, vendorId, dateStr) {
     [adminId, vendorId, d]
   );
 
-  const assignment = assignmentRes.rows[0];
-  if (!assignment) throw new AppError(404, "NOT_FOUND", "Ruta no encontrada");
+  const assignment = assignmentRes.rows[0] || null;
+  // No lanzar 404: si no hay ruta manual, mostrar cobros automáticos del día
 
-  const clientsRes = await query(
-    `
-     WITH last_visit AS (
-       SELECT DISTINCT ON (rv.client_id)
-         rv.client_id, rv.visited, rv.note, rv.visited_at
-       FROM route_visits rv
-       WHERE rv.route_assignment_id = $1
-       ORDER BY rv.client_id, rv.visited_at DESC
-     )
-     SELECT
-       c.id,
-       c.name,
-       c.phone,
-       c.address,
-       rc.visit_order,
-       COALESCE(lv.visited,false) AS visited,
-       lv.note AS visit_note,
-       lv.visited_at,
+  let routeClients = [];
 
-       COALESCE(SUM(CASE WHEN i.due_date = $4::date THEN GREATEST(i.amount_due - i.amount_paid, 0) ELSE 0 END),0)::float8 AS due_today,
-       COALESCE(SUM(CASE WHEN i.due_date < $4::date THEN GREATEST(i.amount_due - i.amount_paid, 0) ELSE 0 END),0)::float8 AS due_overdue,
-       COALESCE(SUM(CASE WHEN i.due_date <= $4::date THEN GREATEST(i.amount_due - i.amount_paid, 0) ELSE 0 END),0)::float8 AS due_total,
-       BOOL_OR(cr.payment_frequency = 'weekly') AS has_weekly_credits
+  if (assignment) {
+    // Clientes de la ruta asignada manualmente
+    const clientsRes = await query(
+      `
+       WITH last_visit AS (
+         SELECT DISTINCT ON (rv.client_id)
+           rv.client_id, rv.visited, rv.note, rv.visited_at
+         FROM route_visits rv
+         WHERE rv.route_assignment_id = $1
+         ORDER BY rv.client_id, rv.visited_at DESC
+       )
+       SELECT
+         c.id,
+         c.name,
+         c.phone,
+         c.address,
+         rc.visit_order,
+         COALESCE(lv.visited,false) AS visited,
+         lv.note AS visit_note,
+         lv.visited_at,
 
-     FROM route_clients rc
-     JOIN clients c ON c.id = rc.client_id
-     LEFT JOIN last_visit lv ON lv.client_id = c.id
+         COALESCE(SUM(CASE WHEN i.due_date = $4::date THEN GREATEST(i.amount_due - i.amount_paid, 0) ELSE 0 END),0)::float8 AS due_today,
+         COALESCE(SUM(CASE WHEN i.due_date < $4::date THEN GREATEST(i.amount_due - i.amount_paid, 0) ELSE 0 END),0)::float8 AS due_overdue,
+         COALESCE(SUM(CASE WHEN i.due_date <= $4::date THEN GREATEST(i.amount_due - i.amount_paid, 0) ELSE 0 END),0)::float8 AS due_total,
+         BOOL_OR(cr.payment_frequency = 'weekly') AS has_weekly_credits
 
-     LEFT JOIN credits cr
-       ON cr.client_id = c.id
-      AND cr.admin_id = $3
-      AND cr.deleted_at IS NULL
-      AND cr.status IN ('active','late')
-      AND cr.balance_amount > 0
+       FROM route_clients rc
+       JOIN clients c ON c.id = rc.client_id
+       LEFT JOIN last_visit lv ON lv.client_id = c.id
 
-     LEFT JOIN installments i
-       ON i.credit_id = cr.id
-      AND i.status IN ('pending','late')
-      AND (i.amount_due - i.amount_paid) > 0
+       LEFT JOIN credits cr
+         ON cr.client_id = c.id
+        AND cr.admin_id = $3
+        AND cr.deleted_at IS NULL
+        AND cr.status IN ('active','late')
+        AND cr.balance_amount > 0
 
-     WHERE rc.route_id = $2
-       AND rc.deleted_at IS NULL
-       AND rc.is_active = true
-       AND c.admin_id = $3
-       AND c.deleted_at IS NULL
+       LEFT JOIN installments i
+         ON i.credit_id = cr.id
+        AND i.status IN ('pending','late')
+        AND (i.amount_due - i.amount_paid) > 0
 
-     GROUP BY
+       WHERE rc.route_id = $2
+         AND rc.deleted_at IS NULL
+         AND rc.is_active = true
+         AND c.admin_id = $3
+         AND c.deleted_at IS NULL
+
+       GROUP BY
+         c.id, c.name, c.phone, c.address,
+         rc.visit_order, lv.visited, lv.note, lv.visited_at
+
+       ORDER BY rc.visit_order ASC
+      `,
+      [assignment.assignment_id, assignment.route_id, adminId, d]
+    );
+
+    routeClients = clientsRes.rows.map((row) => ({
+      ...row,
+      visited_at: row.visited_at ? new Date(row.visited_at).toISOString() : null,
+      deferred: false,
+      auto: false,
+    }));
+  }
+
+  // ── Cobros automáticos: todos los clientes del vendor con cuotas vencidas o de hoy ──
+  const autoRes = await query(
+    `SELECT
        c.id, c.name, c.phone, c.address,
-       rc.visit_order, lv.visited, lv.note, lv.visited_at
-
-
-     ORDER BY rc.visit_order ASC
-    `,
-    [assignment.assignment_id, assignment.route_id, adminId, d]
+       9999 AS visit_order,
+       false AS visited,
+       NULL AS visit_note,
+       NULL AS visited_at,
+       COALESCE(SUM(CASE WHEN i.due_date = $3::date THEN GREATEST(i.amount_due - i.amount_paid, 0) ELSE 0 END),0)::float8 AS due_today,
+       COALESCE(SUM(CASE WHEN i.due_date < $3::date  THEN GREATEST(i.amount_due - i.amount_paid, 0) ELSE 0 END),0)::float8 AS due_overdue,
+       COALESCE(SUM(CASE WHEN i.due_date <= $3::date THEN GREATEST(i.amount_due - i.amount_paid, 0) ELSE 0 END),0)::float8 AS due_total,
+       BOOL_OR(cr.payment_frequency = 'weekly') AS has_weekly_credits
+     FROM credits cr
+     JOIN clients c ON c.id = cr.client_id
+       AND c.admin_id = $1 AND c.deleted_at IS NULL
+     JOIN installments i ON i.credit_id = cr.id
+       AND i.status IN ('pending','late')
+       AND (i.amount_due - i.amount_paid) > 0
+       AND i.due_date <= $3::date
+     WHERE cr.vendor_id = $2
+       AND cr.admin_id = $1
+       AND cr.deleted_at IS NULL
+       AND cr.status IN ('active','late')
+       AND cr.balance_amount > 0
+     GROUP BY c.id, c.name, c.phone, c.address
+     ORDER BY
+       MAX(CASE WHEN i.due_date < $3::date THEN 1 ELSE 0 END) DESC,
+       c.name ASC`,
+    [adminId, vendorId, d]
   );
 
-  const clients = clientsRes.rows.map((row) => ({
-    ...row,
-    visited_at: row.visited_at ? new Date(row.visited_at).toISOString() : null,
-    deferred: false,
-  }));
+  // Mezclar: los de ruta manual tienen prioridad (mantienen estado de visita)
+  const routeIds = new Set(routeClients.map((c) => c.id));
+  const autoClients = autoRes.rows
+    .filter((c) => !routeIds.has(c.id))
+    .map((row) => ({
+      ...row,
+      visited_at: null,
+      deferred: false,
+      auto: true,
+    }));
 
-  // Include clients deferred to this date from previous days
+  let allClients = [...routeClients, ...autoClients];
+
+  // Clientes diferidos
   const deferredRes = await query(
     `SELECT DISTINCT
        c.id, c.name, c.phone, c.address,
@@ -406,16 +455,12 @@ async function getRouteDay(adminId, vendorId, dateStr) {
     [vendorId, adminId, d]
   );
 
-  // Merge without duplicates
-  const existingIds = new Set(clients.map((c) => c.id));
+  const allIds = new Set(allClients.map((c) => c.id));
   const deferred = deferredRes.rows
-    .filter((c) => !existingIds.has(c.id))
-    .map((row) => ({
-      ...row,
-      visited_at: null,
-    }));
+    .filter((c) => !allIds.has(c.id))
+    .map((row) => ({ ...row, visited_at: null, auto: false }));
 
-  const allClients = [...clients, ...deferred];
+  allClients = [...allClients, ...deferred];
 
   const totals = allClients.reduce(
     (acc, c) => {
@@ -434,25 +479,32 @@ async function getRouteDay(adminId, vendorId, dateStr) {
 async function createRouteVisit(adminId, vendorId, payload) {
   const { route_assignment_id, client_id, visited, note } = payload;
 
-  const ra = await query(
-    `SELECT id, admin_id, vendor_id, deleted_at
-     FROM route_assignments
-     WHERE id = $1`,
-    [route_assignment_id]
-  );
-  const row = ra.rows[0];
-  if (!row || row.deleted_at) throw new AppError(404, "NOT_FOUND", "Ruta no encontrada");
-  if (row.admin_id !== adminId) throw new AppError(403, "FORBIDDEN", "Ruta no pertenece a tu admin");
-  if (row.vendor_id !== vendorId) throw new AppError(403, "FORBIDDEN", "No asignado a este vendor");
+  if (route_assignment_id) {
+    // Visita de ruta manual — validar asignación y persistir
+    const ra = await query(
+      `SELECT id, admin_id, vendor_id, deleted_at
+       FROM route_assignments
+       WHERE id = $1`,
+      [route_assignment_id]
+    );
+    const row = ra.rows[0];
+    if (!row || row.deleted_at) throw new AppError(404, "NOT_FOUND", "Ruta no encontrada");
+    if (row.admin_id !== adminId) throw new AppError(403, "FORBIDDEN", "Ruta no pertenece a tu admin");
+    if (row.vendor_id !== vendorId) throw new AppError(403, "FORBIDDEN", "No asignado a este vendor");
 
-  const ins = await query(
-    `INSERT INTO route_visits (admin_id, route_assignment_id, client_id, visited, note)
-     VALUES ($1,$2,$3,$4,$5)
-     RETURNING id, route_assignment_id, client_id, visited, note, visited_at`,
-    [adminId, route_assignment_id, client_id, visited === true, note || null]
-  );
+    const ins = await query(
+      `INSERT INTO route_visits (admin_id, route_assignment_id, client_id, visited, note)
+       VALUES ($1,$2,$3,$4,$5)
+       ON CONFLICT (route_assignment_id, client_id)
+       DO UPDATE SET visited=$4, note=$5, visited_at=now()
+       RETURNING id, route_assignment_id, client_id, visited, note, visited_at`,
+      [adminId, route_assignment_id, client_id, visited === true, note || null]
+    );
+    return ins.rows[0];
+  }
 
-  return ins.rows[0];
+  // Visita automática (sin ruta asignada) — solo confirmar, no persiste en route_visits
+  return { route_assignment_id: null, client_id, visited: visited === true, note: note || null, visited_at: new Date().toISOString() };
 }
 
 module.exports = {

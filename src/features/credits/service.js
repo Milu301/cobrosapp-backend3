@@ -214,9 +214,18 @@ async function createPayment(auth, creditId, payload) {
       if (v.admin_id !== auth.adminId) throw new AppError(403, "FORBIDDEN", "Vendor no pertenece a tu admin");
       if (String(v.status || "").toLowerCase() !== "active") throw new AppError(403, "FORBIDDEN", "Vendor inactivo");
 
-      const inRoute = await vendorHasClientInAssignedRoute(auth.adminId, auth.vendorId, credit.client_id);
-      if (credit.vendor_id !== auth.vendorId && !inRoute) {
-        throw new AppError(403, "FORBIDDEN", "No asignado a este vendor");
+      // Allow if: credit is theirs, client is assigned to them, or client is in their route
+      if (credit.vendor_id !== auth.vendorId) {
+        const [inRoute, clientRow] = await Promise.all([
+          vendorHasClientInAssignedRoute(auth.adminId, auth.vendorId, credit.client_id),
+          query(
+            `SELECT vendor_id FROM clients WHERE id=$1 AND deleted_at IS NULL LIMIT 1`,
+            [credit.client_id]
+          ).then((r) => r.rows[0] || {}),
+        ]);
+        if (!inRoute && clientRow.vendor_id !== auth.vendorId) {
+          throw new AppError(403, "FORBIDDEN", "No asignado a este vendor");
+        }
       }
     }
 

@@ -55,7 +55,7 @@ const routeDayQuerySchema = z.object({
 });
 
 const routeVisitCreateSchema = z.object({
-  route_assignment_id: z.string().uuid(),
+  route_assignment_id: z.string().uuid().optional().nullable(),
   client_id: z.string().uuid(),
   visited: z.coerce.boolean(),
   note: z.string().max(1000).optional().nullable(),
