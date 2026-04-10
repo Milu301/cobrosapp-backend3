@@ -31,7 +31,7 @@ async function collections(req, res) {
     requestIp: req.ctx.ip,
     userAgent: req.ctx.userAgent,
     requestId: req.ctx.requestId,
-    meta: { date: req.query.date }
+    meta: { start_date: req.query.start_date, end_date: req.query.end_date, date: req.query.date }
   });
 
   return ok(res, data);
@@ -39,15 +39,7 @@ async function collections(req, res) {
 
 async function collectionsCsv(req, res) {
   const { adminId } = req.params;
-  const data = await service.collectionsSummary({ adminId: req.auth.adminId }, adminId, req.query);
-
-  const rows = (data.by_vendor || []).map((r) => ({
-    date: data.date,
-    vendor_id: r.vendor_id || "",
-    vendor_name: r.vendor_name,
-    total_amount: r.total_amount,
-    payments_count: r.payments_count
-  }));
+  const rows = await service.collectionsSummary({ adminId: req.auth.adminId }, adminId, req.query);
 
   await auditLog({
     adminId: req.auth.adminId,
@@ -59,12 +51,13 @@ async function collectionsCsv(req, res) {
     requestIp: req.ctx.ip,
     userAgent: req.ctx.userAgent,
     requestId: req.ctx.requestId,
-    meta: { date: req.query.date }
+    meta: { start_date: req.query.start_date, end_date: req.query.end_date, date: req.query.date }
   });
 
-  const csv = toCsv(rows);
+  const csv = toCsv(Array.isArray(rows) ? rows : []);
+  const today = new Date().toISOString().slice(0, 10);
   res.setHeader("Content-Type", "text/csv; charset=utf-8");
-  res.setHeader("Content-Disposition", `attachment; filename="collections_${data.date}.csv"`);
+  res.setHeader("Content-Disposition", `attachment; filename="collections_${today}.csv"`);
   return res.status(200).send(csv);
 }
 
