@@ -7,6 +7,7 @@ const {
   getVendorSubscriptionContext
 } = require("../../services/subscription.service");
 const { signAccessToken } = require("../../utils/jwt");
+const { logger } = require("../../utils/logger");
 
 function nowUtc() {
   return new Date();
@@ -28,7 +29,7 @@ async function adminLogin(req, res) {
        FROM admins
        WHERE LOWER(email) = LOWER($1)
        LIMIT 1`,
-      [email]
+      [email.trim().toLowerCase()]
     );
 
     const admin = r.rows[0];
@@ -39,7 +40,6 @@ async function adminLogin(req, res) {
 
     if (admin.status !== "active") return forbidden(res, "Cuenta inactiva");
 
-    // Subscription check (si aplica)
     const sub = await getAdminSubscription(admin.id);
     if (sub && sub.subscription_expires_at && isExpired(sub.subscription_expires_at)) {
       return forbidden(res, "Suscripción expirada", "SUBSCRIPTION_EXPIRED");
@@ -52,7 +52,6 @@ async function adminLogin(req, res) {
       tokenVersion: admin.token_version
     });
 
-    // ✅ Audit NO debe tumbar login
     try {
       await auditLog({
         adminId: admin.id,
@@ -64,23 +63,21 @@ async function adminLogin(req, res) {
         requestId: req.ctx?.requestId,
         meta: { email: admin.email, success: true }
       });
-    } catch (e) {
-      console.error("auditLog failed (adminLogin):", e.message);
+    } catch (auditErr) {
+      logger.warn("auditLog failed (adminLogin)", { message: auditErr?.message });
     }
 
     return created(res, {
       token,
       admin: {
-        id: admin.id,
         email: admin.email,
         status: admin.status,
         subscription_expires_at: admin.subscription_expires_at
       },
-      // extra por si lo usas luego
       session: { role: "admin", adminId: admin.id, email: admin.email }
     });
   } catch (e) {
-    console.error("adminLogin error:", e);
+    logger.error("adminLogin error", { message: e?.message });
     return forbidden(res, "Error interno", "INTERNAL_ERROR");
   }
 }
@@ -100,7 +97,7 @@ async function vendorLogin(req, res) {
        JOIN admins a ON a.id = v.admin_id
        WHERE LOWER(v.email) = LOWER($1)
        LIMIT 1`,
-      [email]
+      [email.trim().toLowerCase()]
     );
 
     const v = r.rows[0];
@@ -111,17 +108,12 @@ async function vendorLogin(req, res) {
 
     if (v.deleted_at) return forbidden(res, "Cuenta eliminada");
     if (v.status !== "active") return forbidden(res, "Cuenta inactiva");
-    if (v.admin_status !== "active") return forbidden(res, "Admin inactivo");
+    if (v.admin_status !== "active") return forbidden(res, "Cuenta del administrador inactiva");
 
-    // subscription del admin
     const ctx = await getVendorSubscriptionContext(v.id);
     if (ctx && ctx.subscription_expires_at && isExpired(ctx.subscription_expires_at)) {
       return forbidden(res, "Suscripción expirada", "SUBSCRIPTION_EXPIRED");
     }
-
-    // Device check (si tu backend lo usa con hash)
-    // Si en tu DB existe lógica de device mismatch, aquí es donde aplica.
-    // (Dejamos el flujo como está, pero NO lo tumba si tu sistema no usa mismatch aún.)
 
     const token = signAccessToken({
       sub: v.id,
@@ -143,14 +135,13 @@ async function vendorLogin(req, res) {
         requestId: req.ctx?.requestId,
         meta: { email: v.email, success: true }
       });
-    } catch (e) {
-      console.error("auditLog failed (vendorLogin):", e.message);
+    } catch (auditErr) {
+      logger.warn("auditLog failed (vendorLogin)", { message: auditErr?.message });
     }
 
     return created(res, {
       token,
       vendor: {
-        id: v.id,
         admin_id: v.admin_id,
         email: v.email,
         name: v.name,
@@ -159,7 +150,7 @@ async function vendorLogin(req, res) {
       session: { role: "vendor", adminId: v.admin_id, vendorId: v.id, email: v.email, name: v.name }
     });
   } catch (e) {
-    console.error("vendorLogin error:", e);
+    logger.error("vendorLogin error", { message: e?.message });
     return forbidden(res, "Error interno", "INTERNAL_ERROR");
   }
 }

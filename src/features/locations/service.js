@@ -1,40 +1,13 @@
 const { query } = require("../../db/pool");
 const { AppError } = require("../../utils/appError");
-
-function dayRangeUTC(dateStr) {
-  const start = new Date(dateStr + "T00:00:00.000Z");
-  const end = new Date(start);
-  end.setUTCDate(end.getUTCDate() + 1);
-  return { start: start.toISOString(), end: end.toISOString() };
-}
-
-async function getVendor(vendorId) {
-  const r = await query(
-    `SELECT id, admin_id, status, deleted_at
-     FROM vendors
-     WHERE id = $1`,
-    [vendorId]
-  );
-  return r.rows[0] || null;
-}
-
-async function assertAdminOwnsVendor(adminId, vendorId) {
-  const v = await getVendor(vendorId);
-  if (!v || v.deleted_at) throw new AppError(404, "NOT_FOUND", "Vendor no encontrado");
-  if (v.admin_id !== adminId) throw new AppError(403, "FORBIDDEN", "Vendor no pertenece a tu admin");
-  return v;
-}
+const { assertVendorActive, assertVendorBelongsToAdmin } = require("../../utils/vendor");
+const { dayRangeUTC } = require("../../utils/date");
 
 async function postVendorLocation({ adminId, role, vendorId: authVendorId }, vendorIdParam, payload) {
   if (role !== "vendor") throw new AppError(403, "FORBIDDEN", "Solo vendor puede enviar ubicación");
   if (authVendorId !== vendorIdParam) throw new AppError(403, "FORBIDDEN", "No puedes enviar ubicación de otro vendor");
 
-  const v = await getVendor(vendorIdParam);
-  if (!v || v.deleted_at) throw new AppError(404, "NOT_FOUND", "Vendor no encontrado");
-  if (v.admin_id !== adminId) throw new AppError(403, "FORBIDDEN", "Vendor no pertenece a tu admin");
-  if (String(v.status || "").toLowerCase() !== "active") {
-    throw new AppError(403, "FORBIDDEN", "Vendor inactivo");
-  }
+  await assertVendorActive(vendorIdParam, adminId);
 
   const recordedAt = payload.recorded_at ? new Date(payload.recorded_at) : new Date();
 
@@ -69,7 +42,7 @@ async function postVendorLocation({ adminId, role, vendorId: authVendorId }, ven
 
 async function getLatestLocation({ adminId }, adminIdParam, vendorIdParam) {
   if (adminId !== adminIdParam) throw new AppError(403, "FORBIDDEN", "No puedes acceder a otro admin");
-  await assertAdminOwnsVendor(adminId, vendorIdParam);
+  await assertVendorBelongsToAdmin(vendorIdParam, adminId);
 
   const r = await query(
     `SELECT
@@ -89,7 +62,7 @@ async function getLatestLocation({ adminId }, adminIdParam, vendorIdParam) {
 
 async function getLocationHistory({ adminId }, adminIdParam, vendorIdParam, { date, limit, offset }) {
   if (adminId !== adminIdParam) throw new AppError(403, "FORBIDDEN", "No puedes acceder a otro admin");
-  await assertAdminOwnsVendor(adminId, vendorIdParam);
+  await assertVendorBelongsToAdmin(vendorIdParam, adminId);
 
   const { start, end } = dayRangeUTC(date);
 

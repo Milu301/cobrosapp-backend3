@@ -1,27 +1,10 @@
 const { query } = require("../../db/pool");
 const { AppError } = require("../../utils/appError");
 const { env } = require("../../config/env");
+const { clampInt } = require("../../utils/numeric");
+const { assertDateYYYYMMDD, dayWindowSql } = require("../../utils/date");
 
-// ✅ Zona horaria usada para "caja del día" (por defecto Colombia)
 const APP_TZ = env.APP_TIMEZONE || "America/Bogota";
-
-function clampInt(n, { min, max, fallback }) {
-  const v = Number(n);
-  if (!Number.isFinite(v)) return fallback;
-  return Math.max(min, Math.min(max, Math.trunc(v)));
-}
-
-function assertDateYYYYMMDD(dateStr) {
-  if (!/^[0-9]{4}-[0-9]{2}-[0-9]{2}$/.test(String(dateStr || ""))) {
-    throw new AppError(400, "VALIDATION_ERROR", "date debe ser YYYY-MM-DD");
-  }
-}
-
-function dayWindowSql(column, dateParamIdx, tzParamIdx) {
-  // Filtra por "día local" en APP_TZ, pero comparando con occurred_at (timestamptz)
-  return `${column} >= ($${dateParamIdx}::date::timestamp AT TIME ZONE $${tzParamIdx})
-      AND ${column} <  (($${dateParamIdx}::date + 1)::timestamp AT TIME ZONE $${tzParamIdx})`;
-}
 
 async function assertAdminOwnsAdmin(reqAdminId, adminIdParam) {
   if (reqAdminId !== adminIdParam) {
@@ -46,12 +29,6 @@ async function assertAdminOwnsVendor(reqAdminId, vendorId) {
   return v;
 }
 
-// =====================================================
-// ✅ COMPAT: soporta llamadas viejas del controller:
-// - (auth, id, "YYYY-MM-DD", req.query)
-// y llamadas nuevas:
-// - (auth, id, { date, limit, offset })
-// =====================================================
 function normalizeListArgs(optsOrDate, maybeQuery) {
   if (typeof optsOrDate === "string") {
     return {
@@ -69,15 +46,11 @@ function normalizeSummaryArgs(optsOrDate) {
 }
 
 function inferRole(auth) {
-  // Si el controller no manda role, inferimos
   if (auth?.role) return auth.role;
   if (auth?.vendorId) return "vendor";
   return "admin";
 }
 
-// ----------------------------------------------------
-// ✅ Caja Vendor
-// ----------------------------------------------------
 async function listVendorCash(auth, vendorIdParam, optsOrDate, maybeQuery) {
   const role = inferRole(auth);
 
@@ -90,7 +63,6 @@ async function listVendorCash(auth, vendorIdParam, optsOrDate, maybeQuery) {
   const { date, limit, offset } = normalizeListArgs(optsOrDate, maybeQuery);
   assertDateYYYYMMDD(date);
 
-  // ✅ schema.js valida max 100
   const limitN = clampInt(limit, { min: 1, max: 100, fallback: 50 });
   const offsetN = clampInt(offset, { min: 0, max: 1_000_000, fallback: 0 });
 
@@ -189,16 +161,12 @@ async function createVendorCashMovement(auth, vendorIdParam, payload) {
   return r.rows[0];
 }
 
-// ----------------------------------------------------
-// ✅ Caja Admin
-// ----------------------------------------------------
 async function listAdminCash(auth, adminIdParam, optsOrDate, maybeQuery) {
   await assertAdminOwnsAdmin(auth.adminId, adminIdParam);
 
   const { date, limit, offset } = normalizeListArgs(optsOrDate, maybeQuery);
   assertDateYYYYMMDD(date);
 
-  // ✅ schema.js valida max 100
   const limitN = clampInt(limit, { min: 1, max: 100, fallback: 50 });
   const offsetN = clampInt(offset, { min: 0, max: 1_000_000, fallback: 0 });
 
@@ -281,27 +249,18 @@ async function createAdminCashMovement(auth, adminIdParam, payload) {
   return r.rows[0];
 }
 
-// =====================================================
-// ✅ ALIASES para que tu controller viejo NO reviente
-// (cashService.adminCashList / vendorCashList / adminCashCreate / vendorCashCreate)
-// =====================================================
 const vendorCashList = listVendorCash;
 const adminCashList = listAdminCash;
-
 const vendorCashCreate = createVendorCashMovement;
 const adminCashCreate = createAdminCashMovement;
 
 module.exports = {
-  // Nombres “nuevos”
   listVendorCash,
   vendorCashSummary,
   createVendorCashMovement,
-
   listAdminCash,
   adminCashSummary,
   createAdminCashMovement,
-
-  // Compat con controller viejo
   vendorCashList,
   adminCashList,
   vendorCashCreate,

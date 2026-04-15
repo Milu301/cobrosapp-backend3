@@ -1,10 +1,7 @@
 const { pool, query } = require("../../db/pool");
 const { AppError } = require("../../utils/appError");
-
-function toInt(v, def) {
-  const n = parseInt(v, 10);
-  return Number.isFinite(n) ? n : def;
-}
+const { toInt } = require("../../utils/numeric");
+const { assertVendorActive } = require("../../utils/vendor");
 
 async function assertRouteBelongsToAdmin(adminId, routeId) {
   const r = await query(
@@ -19,8 +16,6 @@ async function assertRouteBelongsToAdmin(adminId, routeId) {
   return true;
 }
 
-// ✅ FIX: faltaba esta función y por eso el backend tiraba
-// "Unhandled error: getRouteById is not defined".
 async function getRouteById(routeId) {
   const r = await query(
     `SELECT id, admin_id, name, description, status, created_at, updated_at, deleted_at
@@ -136,7 +131,6 @@ async function softDeleteRoute(routeId, adminId) {
   return r.rows[0] || null;
 }
 
-// ✅ Helper real (antes estabas llamando listRouteClients pero no existía)
 async function listRouteClients(adminId, routeId) {
   const r = await query(
     `SELECT
@@ -165,32 +159,36 @@ async function setRouteClients(adminId, routeId, clients) {
 
   if (!Array.isArray(clients)) throw new AppError(400, "VALIDATION_ERROR", "clients inválido");
 
+  const validItems = clients
+    .map(item => ({
+      clientId: item.client_id || item.id,
+      visitOrder: Number.isFinite(item.visit_order) ? item.visit_order : 999999,
+    }))
+    .filter(item => !!item.clientId);
+
   const db = await pool.connect();
   try {
     await db.query("BEGIN");
 
-    // borramos el “set” anterior para evitar duplicados
     await db.query(`DELETE FROM route_clients WHERE route_id = $1`, [routeId]);
 
-    // insert nuevo set
-    for (const item of clients) {
-      const clientId = item.client_id || item.id;
-      const visitOrder = Number.isFinite(item.visit_order) ? item.visit_order : null;
-
-      if (!clientId) continue;
-
-      // validar cliente pertenece al admin
-      const c = await db.query(
-        `SELECT id FROM clients WHERE id = $1 AND admin_id = $2 AND deleted_at IS NULL`,
-        [clientId, adminId]
+    if (validItems.length > 0) {
+      // Validate all client IDs in a single query instead of one per item
+      const validRes = await db.query(
+        `SELECT id FROM clients WHERE id = ANY($1::uuid[]) AND admin_id = $2 AND deleted_at IS NULL`,
+        [validItems.map(i => i.clientId), adminId]
       );
-      if (!c.rows[0]) continue;
+      const validSet = new Set(validRes.rows.map(r => r.id));
+      const toInsert = validItems.filter(i => validSet.has(i.clientId));
 
-      await db.query(
-        `INSERT INTO route_clients (route_id, client_id, visit_order, is_active)
-         VALUES ($1,$2, COALESCE($3, 999999), true)`,
-        [routeId, clientId, visitOrder]
-      );
+      if (toInsert.length > 0) {
+        await db.query(
+          `INSERT INTO route_clients (route_id, client_id, visit_order, is_active)
+           SELECT $1, c, v, true
+           FROM unnest($2::uuid[], $3::int[]) AS t(c, v)`,
+          [routeId, toInsert.map(i => i.clientId), toInsert.map(i => i.visitOrder)]
+        );
+      }
     }
 
     await db.query("COMMIT");
@@ -240,29 +238,17 @@ async function assignRouteToVendor(adminId, routeId, payload) {
   await assertRouteBelongsToAdmin(adminId, routeId);
 
   const vendorId = payload.vendor_id;
-  const assignedDate = payload.assigned_date; // YYYY-MM-DD
+  const assignedDate = payload.assigned_date;
 
   if (!vendorId) throw new AppError(400, "VALIDATION_ERROR", "vendor_id requerido");
   if (!assignedDate) throw new AppError(400, "VALIDATION_ERROR", "assigned_date requerido");
 
-  // validar vendor
-  const v = await query(
-    `SELECT id, admin_id, status, deleted_at
-     FROM vendors
-     WHERE id = $1`,
-    [vendorId]
-  );
-  const vendor = v.rows[0];
-  if (!vendor || vendor.deleted_at) throw new AppError(400, "VALIDATION_ERROR", "vendor_id inválido");
-  if (vendor.admin_id !== adminId) throw new AppError(403, "FORBIDDEN", "Vendor no pertenece a tu admin");
-  if (String(vendor.status || "").toLowerCase() !== "active")
-    throw new AppError(403, "FORBIDDEN", "Vendor inactivo");
+  await assertVendorActive(vendorId, adminId);
 
   const db = await pool.connect();
   try {
     await db.query("BEGIN");
 
-    // “cancelar” asignaciones anteriores en ese día para esa ruta (evita duplicados raros)
     await db.query(
       `UPDATE route_assignments
        SET deleted_at = now(),
@@ -291,7 +277,6 @@ async function assignRouteToVendor(adminId, routeId, payload) {
   }
 }
 
-// ===== Vendor: ver ruta del día =====
 async function getRouteDay(adminId, vendorId, dateStr) {
   const d = dateStr || new Date().toISOString().slice(0, 10);
 
@@ -392,7 +377,6 @@ async function getRouteDay(adminId, vendorId, dateStr) {
   return { assignment, totals, clients };
 }
 
-// ===== Vendor: marcar visita =====
 async function createRouteVisit(adminId, vendorId, payload) {
   const { route_assignment_id, client_id, visited, note } = payload;
 
@@ -428,7 +412,5 @@ module.exports = {
   assignRouteToVendor,
   getRouteDay,
   createRouteVisit,
-
-  // por si en algún lado lo ocupas
   getRouteById,
 };
