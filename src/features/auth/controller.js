@@ -70,6 +70,8 @@ async function adminLogin(req, res) {
     return created(res, {
       token,
       admin: {
+        adminId: admin.id,
+        id: admin.id,
         email: admin.email,
         status: admin.status,
         subscription_expires_at: admin.subscription_expires_at
