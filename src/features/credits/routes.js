@@ -6,6 +6,12 @@ const controller = require("./controller");
 
 const creditRoutes = express.Router();
 
+creditRoutes.get(
+  "/clients/:clientId/credits",
+  roleGuard("admin", "vendor"),
+  asyncHandler(controller.getCredits)
+);
+
 creditRoutes.post(
   "/clients/:clientId/credits",
   roleGuard("admin", "vendor"),

@@ -5,7 +5,8 @@ const { env } = require("../../config/env");
 const APP_TZ = env.APP_TIMEZONE || "America/Bogota";
 
 async function getAdminStats(adminId) {
-  const [vendors, clients, credits, overdue, cash] = await Promise.all([
+  const today = new Date().toISOString().slice(0, 10);
+  const [vendors, clients, credits, overdue, cash, todayPay] = await Promise.all([
     query(
       `SELECT
          COUNT(*) FILTER (WHERE status = 'active') AS active_vendors,
@@ -53,40 +54,49 @@ async function getAdminStats(adminId) {
          AND deleted_at IS NULL
          AND occurred_at >= ($2::date::timestamp AT TIME ZONE $3)
          AND occurred_at <  (($2::date + 1)::timestamp AT TIME ZONE $3)`,
-      [adminId, new Date().toISOString().slice(0, 10), APP_TZ]
+      [adminId, today, APP_TZ]
+    ),
+    // Sum of all vendor payments received today
+    query(
+      `SELECT COALESCE(SUM(p.amount), 0)::float8 AS today_collections,
+              COUNT(p.id)::int AS payment_count
+       FROM payments p
+       WHERE p.admin_id = $1
+         AND p.paid_at >= ($2::date::timestamp AT TIME ZONE $3)
+         AND p.paid_at <  (($2::date + 1)::timestamp AT TIME ZONE $3)`,
+      [adminId, today, APP_TZ]
     ),
   ]);
 
-  const v = vendors.rows[0] || {};
-  const cl = clients.rows[0] || {};
-  const cr = credits.rows[0] || {};
-  const ov = overdue.rows[0] || {};
-  const ca = cash.rows[0] || {};
+  const v  = vendors.rows[0]  || {};
+  const cl = clients.rows[0]  || {};
+  const cr = credits.rows[0]  || {};
+  const ov = overdue.rows[0]  || {};
+  const ca = cash.rows[0]     || {};
+  const tp = todayPay.rows[0] || {};
+
+  const activeCredits  = (parseInt(cr.active_credits)  || 0);
+  const lateCredits    = (parseInt(cr.late_credits)    || 0);
+  const totalPortfolio = Number(cr.total_portfolio) || 0;
+  const overdueAmount  = Number(ov.overdue_amount)  || 0;
+  const todayCollect   = Number(tp.today_collections) || 0;
 
   return {
-    vendors: {
-      active: parseInt(v.active_vendors) || 0,
-      total: parseInt(v.total_vendors) || 0,
-    },
-    clients: {
-      active: parseInt(cl.active_clients) || 0,
-      total: parseInt(cl.total_clients) || 0,
-    },
-    credits: {
-      active: parseInt(cr.active_credits) || 0,
-      late: parseInt(cr.late_credits) || 0,
-      total_portfolio: Number(cr.total_portfolio) || 0,
-      total_outstanding: Number(cr.total_outstanding) || 0,
-    },
-    overdue: {
-      credits: parseInt(ov.overdue_credits) || 0,
-      amount: Number(ov.overdue_amount) || 0,
-    },
-    cash_today: {
-      income: Number(ca.today_income) || 0,
-      expense: Number(ca.today_expense) || 0,
-      net: (Number(ca.today_income) || 0) - (Number(ca.today_expense) || 0),
-    },
+    // Nested structure
+    vendors:    { active: parseInt(v.active_vendors) || 0, total: parseInt(v.total_vendors) || 0 },
+    clients:    { active: parseInt(cl.active_clients) || 0, total: parseInt(cl.total_clients) || 0 },
+    credits:    { active: activeCredits, late: lateCredits, total_portfolio: totalPortfolio, total_outstanding: Number(cr.total_outstanding) || 0 },
+    overdue:    { credits: parseInt(ov.overdue_credits) || 0, amount: overdueAmount },
+    cash_today: { income: Number(ca.today_income) || 0, expense: Number(ca.today_expense) || 0, net: (Number(ca.today_income) || 0) - (Number(ca.today_expense) || 0) },
+
+    // Flat fields for frontend Dashboard compatibility
+    totalVendors:      parseInt(v.total_vendors)     || 0,
+    totalClients:      parseInt(cl.active_clients)   || 0,
+    activeCredits:     activeCredits + lateCredits,
+    totalPortfolio,
+    overdueAmount,
+    todayCollections:  todayCollect,
+    paymentCount:      parseInt(tp.payment_count)    || 0,
   };
 }
 

@@ -129,41 +129,41 @@ function assertAdminScope(auth, adminIdParam) {
   if (auth.adminId !== adminIdParam) throw new AppError(403, "FORBIDDEN", "No pertenece a tu admin");
 }
 
-async function collectionsSummary(auth, adminIdParam, { date }) {
+async function collectionsSummary(auth, adminIdParam, { date, start_date, end_date }) {
   assertAdminScope(auth, adminIdParam);
-  const d = toDateOnly(date) || new Date().toISOString().slice(0, 10);
+  const today = new Date().toISOString().slice(0, 10);
+  const startD = toDateOnly(start_date) || toDateOnly(date) || today;
+  const endD   = toDateOnly(end_date)   || toDateOnly(date) || today;
 
   const rowsRes = await query(
     `SELECT
-       p.vendor_id,
-       COALESCE(v.name, 'Sin vendedor') AS vendor_name,
-       COUNT(*)::int AS payments_count,
-       COALESCE(SUM(p.amount),0)::float8 AS total_amount
+       p.id,
+       p.paid_at AS date,
+       COALESCE(v.name, 'Sin vendedor') AS vendor,
+       COALESCE(cl.name, 'Sin cliente') AS client,
+       p.amount,
+       COALESCE(p.method, 'cash') AS payment_method,
+       COALESCE(i.status, 'paid') AS status,
+       i.installment_number AS installment
      FROM payments p
      LEFT JOIN vendors v ON v.id = p.vendor_id
+     LEFT JOIN credits cr ON cr.id = p.credit_id
+     LEFT JOIN clients cl ON cl.id = cr.client_id
+     LEFT JOIN LATERAL (
+       SELECT status, installment_number
+       FROM installments ins
+       WHERE ins.credit_id = p.credit_id
+         AND ins.due_date <= p.paid_at::date
+       ORDER BY ins.due_date DESC LIMIT 1
+     ) i ON true
      WHERE p.admin_id = $1
        AND p.paid_at >= $2::date
-       AND p.paid_at < ($2::date + INTERVAL '1 day')
-     GROUP BY p.vendor_id, v.name
-     ORDER BY total_amount DESC, payments_count DESC`,
-    [adminIdParam, d]
+       AND p.paid_at < ($3::date + INTERVAL '1 day')
+     ORDER BY p.paid_at DESC`,
+    [adminIdParam, startD, endD]
   );
 
-  const totals = rowsRes.rows.reduce(
-    (acc, r) => {
-      acc.total_amount += Number(r.total_amount || 0);
-      acc.payments_count += Number(r.payments_count || 0);
-      return acc;
-    },
-    { total_amount: 0, payments_count: 0 }
-  );
-
-  return {
-    date: d,
-    total_amount: totals.total_amount,
-    payments_count: totals.payments_count,
-    by_vendor: rowsRes.rows,
-  };
+  return rowsRes.rows;
 }
 
 async function lateClients(auth, adminIdParam, { date, limit, offset }) {
@@ -174,14 +174,23 @@ async function lateClients(auth, adminIdParam, { date, limit, offset }) {
 
   const itemsRes = await query(
     `SELECT
-       c.id AS client_id,
-       c.name AS client_name,
+       c.id,
+       c.name AS "clientName",
        c.phone,
        c.address,
        c.vendor_id,
-       COALESCE(v.name, 'Sin vendedor') AS vendor_name,
-       COALESCE(SUM(GREATEST(i.amount_due - i.amount_paid, 0)),0)::float8 AS overdue_amount,
-       COUNT(*)::int AS overdue_installments
+       COALESCE(v.name, 'Sin vendedor') AS vendor,
+       COALESCE(SUM(GREATEST(i.amount_due - i.amount_paid, 0)),0)::float8 AS "overdueAmount",
+       COUNT(*)::int AS overdue_installments,
+       (CURRENT_DATE - MIN(i.due_date))::int AS "daysLate",
+       (
+         SELECT COALESCE(SUM(cr2.balance_amount), 0)::float8
+         FROM credits cr2
+         WHERE cr2.client_id = c.id
+           AND cr2.admin_id = $1
+           AND cr2.deleted_at IS NULL
+           AND cr2.status IN ('active','late')
+       ) AS "totalDebt"
      FROM clients c
      JOIN credits cr ON cr.client_id = c.id
      JOIN installments i ON i.credit_id = cr.id
@@ -195,7 +204,7 @@ async function lateClients(auth, adminIdParam, { date, limit, offset }) {
        AND i.due_date < $2::date
        AND (i.amount_due - i.amount_paid) > 0
      GROUP BY c.id, v.name
-     ORDER BY overdue_amount DESC
+     ORDER BY "overdueAmount" DESC
      LIMIT $3 OFFSET $4`,
     [adminIdParam, d, lim, off]
   );
@@ -223,50 +232,78 @@ async function lateClients(auth, adminIdParam, { date, limit, offset }) {
   return { items: itemsRes.rows, total: totalRes.rows[0]?.total || 0 };
 }
 
-async function vendorPerformance(auth, adminIdParam, { date }) {
+async function vendorPerformance(auth, adminIdParam, { date, start_date, end_date }) {
   assertAdminScope(auth, adminIdParam);
-  const d = toDateOnly(date) || new Date().toISOString().slice(0, 10);
+  const today = new Date().toISOString().slice(0, 10);
+  const startD = toDateOnly(start_date) || toDateOnly(date) || today;
+  const endD   = toDateOnly(end_date)   || toDateOnly(date) || today;
 
   const res = await query(
     `SELECT
-       v.id AS vendor_id,
-       v.name AS vendor_name,
-
-       COALESCE(p.payments_count,0)::int AS payments_count,
-       COALESCE(p.total_amount,0)::float8 AS total_amount,
-
-       COALESCE(rv.visits_count,0)::int AS visits_count,
-       COALESCE(rv.visited_true,0)::int AS visited_true,
-       COALESCE(rv.visited_false,0)::int AS visited_false
+       v.id,
+       v.name,
+       COALESCE(cli.client_count,    0)::int    AS clients,
+       COALESCE(cred.active_credits, 0)::int    AS "activeCredits",
+       COALESCE(pay.collected,       0)::float8 AS collected,
+       COALESCE(cred.portfolio,      0)::float8 AS portfolio,
+       COALESCE(overdue.overdue_clients, 0)::int AS "overdueClients",
+       CASE
+         WHEN COALESCE(cred.portfolio, 0) > 0
+         THEN ROUND((COALESCE(pay.collected, 0) / cred.portfolio * 100)::numeric, 1)::float8
+         ELSE 0
+       END AS "collectionRate"
      FROM vendors v
+
+     LEFT JOIN LATERAL (
+       SELECT COUNT(*)::int AS client_count
+       FROM clients c
+       WHERE c.vendor_id = v.id
+         AND c.admin_id = $1
+         AND c.deleted_at IS NULL
+         AND c.status = 'active'
+     ) cli ON true
+
      LEFT JOIN LATERAL (
        SELECT
-         COUNT(*)::int AS payments_count,
-         COALESCE(SUM(p.amount),0)::float8 AS total_amount
+         COUNT(*) FILTER (WHERE cr.status IN ('active','late'))::int AS active_credits,
+         COALESCE(SUM(CASE WHEN cr.status IN ('active','late') THEN cr.balance_amount ELSE 0 END), 0)::float8 AS portfolio
+       FROM credits cr
+       JOIN clients c ON c.id = cr.client_id
+       WHERE (cr.vendor_id = v.id OR c.vendor_id = v.id)
+         AND cr.admin_id = $1
+         AND cr.deleted_at IS NULL
+     ) cred ON true
+
+     LEFT JOIN LATERAL (
+       SELECT COALESCE(SUM(p.amount), 0)::float8 AS collected
        FROM payments p
-       WHERE p.admin_id = $1
-         AND p.vendor_id = v.id
+       WHERE p.vendor_id = v.id
+         AND p.admin_id = $1
          AND p.paid_at >= $2::date
-         AND p.paid_at < ($2::date + INTERVAL '1 day')
-     ) p ON true
+         AND p.paid_at < ($3::date + INTERVAL '1 day')
+     ) pay ON true
+
      LEFT JOIN LATERAL (
-       SELECT
-         COUNT(*)::int AS visits_count,
-         COUNT(*) FILTER (WHERE visited = true)::int AS visited_true,
-         COUNT(*) FILTER (WHERE visited = false)::int AS visited_false
-       FROM route_visits rv
-       WHERE rv.admin_id = $1
-         AND rv.vendor_id = v.id
-         AND rv.visited_at >= $2::date
-         AND rv.visited_at < ($2::date + INTERVAL '1 day')
-     ) rv ON true
+       SELECT COUNT(DISTINCT c.id)::int AS overdue_clients
+       FROM clients c
+       JOIN credits cr ON cr.client_id = c.id
+       JOIN installments i ON i.credit_id = cr.id
+       WHERE (cr.vendor_id = v.id OR c.vendor_id = v.id)
+         AND cr.admin_id = $1
+         AND cr.deleted_at IS NULL
+         AND cr.status IN ('active','late')
+         AND i.status IN ('pending','late')
+         AND i.due_date < CURRENT_DATE
+         AND (i.amount_due - i.amount_paid) > 0
+     ) overdue ON true
+
      WHERE v.admin_id = $1
        AND v.deleted_at IS NULL
-     ORDER BY total_amount DESC, payments_count DESC`,
-    [adminIdParam, d]
+     ORDER BY collected DESC, clients DESC`,
+    [adminIdParam, startD, endD]
   );
 
-  return { date: d, by_vendor: res.rows };
+  return res.rows;
 }
 
 module.exports = {

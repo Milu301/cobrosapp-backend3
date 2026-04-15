@@ -54,4 +54,13 @@ async function createPayment(req, res) {
   return created(res, result);
 }
 
-module.exports = { createCredit, createPayment };
+async function getCredits(req, res) {
+  const { clientId } = req.params;
+  const credits = await service.listClientCredits(
+    { role: req.auth.role, adminId: req.auth.adminId, vendorId: req.auth.vendorId },
+    clientId
+  );
+  return ok(res, credits);
+}
+
+module.exports = { createCredit, createPayment, getCredits };

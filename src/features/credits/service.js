@@ -1,9 +1,19 @@
 const { pool, query } = require("../../db/pool");
 const { AppError } = require("../../utils/appError");
 const { round2 } = require("../../utils/numeric");
-const { addDays } = require("../../utils/date");
+const { addDays, addMonths } = require("../../utils/date");
 const { getVendorById } = require("../../utils/vendor");
 const { permTrue } = require("../../utils/permissions");
+
+function calcDueDate(startDate, installmentIndex, frequency) {
+  switch (frequency) {
+    case "interdaily": return addDays(startDate, installmentIndex * 2);
+    case "weekly":     return addDays(startDate, installmentIndex * 7);
+    case "biweekly":   return addDays(startDate, installmentIndex * 14);
+    case "monthly":    return addMonths(startDate, installmentIndex);
+    default:           return addDays(startDate, installmentIndex); // daily
+  }
+}
 
 async function getClientById(clientId) {
   const r = await query(
@@ -76,6 +86,7 @@ async function createCredit(auth, clientId, payload) {
   const interestRate = round2(payload.interest_rate || 0);
   const count = Number(payload.installments_count);
   const currencyCode = String(payload.currency_code || "COP").toUpperCase();
+  const frequency = payload.payment_frequency || "daily";
 
   const total = round2(principal * (1 + interestRate / 100));
   const centsTotal = Math.round(total * 100);
@@ -90,28 +101,28 @@ async function createCredit(auth, clientId, payload) {
       `INSERT INTO credits
         (admin_id, client_id, vendor_id,
          principal_amount, interest_rate, installments_count, start_date,
-         status, total_amount, balance, balance_amount, currency_code, notes)
+         payment_frequency, status, total_amount, balance, balance_amount, currency_code, notes)
        VALUES
-        ($1,$2,$3,$4,$5,$6,$7,'active',$8,$9,$10,$11,$12)
+        ($1,$2,$3,$4,$5,$6,$7,$8,'active',$9,$10,$11,$12,$13)
        RETURNING
         id, admin_id, client_id, vendor_id,
         principal_amount::float8, interest_rate::float8,
-        installments_count, start_date, status,
+        installments_count, start_date, payment_frequency, status,
         total_amount::float8, balance::float8, balance_amount::float8,
         currency_code, notes, created_at, updated_at`,
       [auth.adminId, clientId, vendorId, principal, interestRate, count,
-       payload.start_date, total, total, total, currencyCode, payload.notes || null]
+       payload.start_date, frequency, total, total, total, currencyCode, payload.notes || null]
     );
 
     const credit = cr.rows[0];
 
-    // Batch insert all installments in a single query instead of N sequential inserts
+    // Batch insert all installments in a single query
     const instNums = [];
     const dueDates = [];
     const amountsDue = [];
     for (let i = 1; i <= count; i++) {
       instNums.push(i);
-      dueDates.push(addDays(payload.start_date, i - 1));
+      dueDates.push(calcDueDate(payload.start_date, i - 1, frequency));
       amountsDue.push((i === count ? baseCents + remainder : baseCents) / 100);
     }
     await client.query(
@@ -181,9 +192,18 @@ async function createPayment(auth, creditId, payload) {
       if (v.admin_id !== auth.adminId) throw new AppError(403, "FORBIDDEN", "Vendor no pertenece a tu admin");
       if (String(v.status || "").toLowerCase() !== "active") throw new AppError(403, "FORBIDDEN", "Vendor inactivo");
 
-      const inRoute = await vendorHasClientInAssignedRoute(auth.adminId, auth.vendorId, credit.client_id);
-      if (credit.vendor_id !== auth.vendorId && !inRoute) {
-        throw new AppError(403, "FORBIDDEN", "No asignado a este vendor");
+      // Allow if: credit is theirs, client is assigned to them, or client is in their route
+      if (credit.vendor_id !== auth.vendorId) {
+        const [inRoute, clientRow] = await Promise.all([
+          vendorHasClientInAssignedRoute(auth.adminId, auth.vendorId, credit.client_id),
+          query(
+            `SELECT vendor_id FROM clients WHERE id=$1 AND deleted_at IS NULL LIMIT 1`,
+            [credit.client_id]
+          ).then((r) => r.rows[0] || {}),
+        ]);
+        if (!inRoute && clientRow.vendor_id !== auth.vendorId) {
+          throw new AppError(403, "FORBIDDEN", "No asignado a este vendor");
+        }
       }
     }
 
@@ -299,4 +319,37 @@ async function createPayment(auth, creditId, payload) {
   }
 }
 
-module.exports = { createCredit, createPayment };
+async function listClientCredits(auth, clientId) {
+  const clientRow = await getClientById(clientId);
+  if (!clientRow || clientRow.deleted_at) throw new AppError(404, "NOT_FOUND", "Cliente no encontrado");
+  if (clientRow.admin_id !== auth.adminId) throw new AppError(403, "FORBIDDEN", "Cliente no pertenece a tu admin");
+
+  const r = await query(
+    `SELECT
+       c.id, c.admin_id, c.client_id, c.vendor_id,
+       c.principal_amount::float8, c.interest_rate::float8,
+       c.installments_count, c.start_date, c.payment_frequency, c.status,
+       c.total_amount::float8, c.balance::float8, c.balance_amount::float8,
+       c.currency_code, c.notes, c.created_at, c.updated_at,
+       v.name AS vendor_name,
+       (
+         SELECT json_agg(i ORDER BY i.installment_number)
+         FROM (
+           SELECT id, installment_number, due_date,
+                  amount_due::float8, amount_paid::float8, status
+           FROM installments
+           WHERE credit_id = c.id
+           ORDER BY installment_number
+         ) i
+       ) AS installments
+     FROM credits c
+     LEFT JOIN vendors v ON v.id = c.vendor_id
+     WHERE c.client_id = $1 AND c.deleted_at IS NULL
+     ORDER BY c.created_at DESC`,
+    [clientId]
+  );
+
+  return r.rows;
+}
+
+module.exports = { createCredit, createPayment, listClientCredits };

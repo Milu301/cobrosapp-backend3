@@ -72,6 +72,12 @@ async function update(req, res) {
 
   if (req.auth.role === "vendor") {
     if (client.vendor_id !== req.auth.vendorId) throw new AppError(403, "FORBIDDEN", "No asignado a este vendor");
+    // Vendors can only edit clients they created within the last 24 hours
+    const createdAt = new Date(client.created_at).getTime();
+    const hoursSinceCreation = (Date.now() - createdAt) / (1000 * 60 * 60);
+    if (hoursSinceCreation > 24) {
+      throw new AppError(403, "FORBIDDEN", "Solo el administrador puede editar clientes con más de 24h de creación");
+    }
   }
 
   if (req.body.vendor_id) await service.assertVendorBelongsToAdmin(req.body.vendor_id, req.auth.adminId);

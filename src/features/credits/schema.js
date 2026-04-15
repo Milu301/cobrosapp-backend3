@@ -7,6 +7,10 @@ const createCreditSchema = z.object({
   interest_rate: z.coerce.number().min(0).max(999).optional().default(0),
   installments_count: z.coerce.number().int().min(1).max(3650),
   start_date: z.string().regex(dateRegex, "Formato inválido (YYYY-MM-DD)"),
+  payment_frequency: z
+    .enum(["daily", "interdaily", "weekly", "biweekly", "monthly"])
+    .optional()
+    .default("daily"),
   notes: z.string().trim().max(1000).optional().nullable(),
   currency_code: z
     .string()

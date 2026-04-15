@@ -288,6 +288,8 @@ async function getRouteDay(adminId, vendorId, dateStr) {
         ra.vendor_id,
         ra.assigned_date,
         ra.status,
+        ra.created_at,
+        ra.updated_at,
         rt.name AS route_name
      FROM route_assignments ra
      JOIN routes rt ON rt.id = ra.route_id
@@ -302,103 +304,343 @@ async function getRouteDay(adminId, vendorId, dateStr) {
     [adminId, vendorId, d]
   );
 
-  const assignment = assignmentRes.rows[0];
-  if (!assignment) throw new AppError(404, "NOT_FOUND", "Ruta no encontrada");
+  const assignment = assignmentRes.rows[0] || null;
+  // No lanzar 404: si no hay ruta manual, mostrar cobros automáticos del día
 
-  const clientsRes = await query(
-    `
-     WITH last_visit AS (
-       SELECT DISTINCT ON (rv.client_id)
-         rv.client_id, rv.visited, rv.note, rv.visited_at
-       FROM route_visits rv
-       WHERE rv.route_assignment_id = $1
-       ORDER BY rv.client_id, rv.visited_at DESC
-     )
-     SELECT
-       c.id,
-       c.name,
-       c.phone,
-       c.address,
-       rc.visit_order,
-       COALESCE(lv.visited,false) AS visited,
-       lv.note AS visit_note,
-       lv.visited_at,
+  let routeClients = [];
 
-       COALESCE(SUM(CASE WHEN i.due_date = $4::date THEN GREATEST(i.amount_due - i.amount_paid, 0) ELSE 0 END),0)::float8 AS due_today,
-       COALESCE(SUM(CASE WHEN i.due_date < $4::date THEN GREATEST(i.amount_due - i.amount_paid, 0) ELSE 0 END),0)::float8 AS due_overdue,
-       COALESCE(SUM(CASE WHEN i.due_date <= $4::date THEN GREATEST(i.amount_due - i.amount_paid, 0) ELSE 0 END),0)::float8 AS due_total
+  if (assignment) {
+    // Clientes de la ruta asignada manualmente
+    const clientsRes = await query(
+      `
+       WITH last_visit AS (
+         SELECT DISTINCT ON (rv.client_id)
+           rv.client_id, rv.visited, rv.note, rv.visited_at
+         FROM route_visits rv
+         WHERE rv.route_assignment_id = $1
+         ORDER BY rv.client_id, rv.visited_at DESC
+       )
+       SELECT
+         c.id,
+         c.name,
+         c.phone,
+         c.address,
+         rc.visit_order,
+         COALESCE(lv.visited,false) AS visited,
+         lv.note AS visit_note,
+         lv.visited_at,
 
-     FROM route_clients rc
-     JOIN clients c ON c.id = rc.client_id
-     LEFT JOIN last_visit lv ON lv.client_id = c.id
+         COALESCE(SUM(CASE WHEN i.due_date = $4::date THEN GREATEST(i.amount_due - i.amount_paid, 0) ELSE 0 END),0)::float8 AS due_today,
+         COALESCE(SUM(CASE WHEN i.due_date < $4::date THEN GREATEST(i.amount_due - i.amount_paid, 0) ELSE 0 END),0)::float8 AS due_overdue,
+         COALESCE(SUM(CASE WHEN i.due_date <= $4::date THEN GREATEST(i.amount_due - i.amount_paid, 0) ELSE 0 END),0)::float8 AS due_total,
+         BOOL_OR(cr.payment_frequency = 'weekly') AS has_weekly_credits
 
-     LEFT JOIN credits cr
-       ON cr.client_id = c.id
-      AND cr.admin_id = $3
-      AND cr.deleted_at IS NULL
-      AND cr.status IN ('active','late')
-      AND cr.balance_amount > 0
+       FROM route_clients rc
+       JOIN clients c ON c.id = rc.client_id
+       LEFT JOIN last_visit lv ON lv.client_id = c.id
 
-     LEFT JOIN installments i
-       ON i.credit_id = cr.id
-      AND i.status IN ('pending','late')
-      AND (i.amount_due - i.amount_paid) > 0
+       LEFT JOIN credits cr
+         ON cr.client_id = c.id
+        AND cr.admin_id = $3
+        AND cr.deleted_at IS NULL
+        AND cr.status IN ('active','late')
+        AND cr.balance_amount > 0
 
-     WHERE rc.route_id = $2
-       AND rc.deleted_at IS NULL
-       AND rc.is_active = true
-       AND c.admin_id = $3
-       AND c.deleted_at IS NULL
+       LEFT JOIN installments i
+         ON i.credit_id = cr.id
+        AND i.status IN ('pending','late')
+        AND (i.amount_due - i.amount_paid) > 0
 
-     GROUP BY
+       WHERE rc.route_id = $2
+         AND rc.deleted_at IS NULL
+         AND rc.is_active = true
+         AND c.admin_id = $3
+         AND c.deleted_at IS NULL
+
+       GROUP BY
+         c.id, c.name, c.phone, c.address,
+         rc.visit_order, lv.visited, lv.note, lv.visited_at
+
+       HAVING COALESCE(SUM(CASE WHEN i.due_date <= $4::date THEN GREATEST(i.amount_due - i.amount_paid, 0) ELSE 0 END), 0) > 0
+
+       ORDER BY rc.visit_order ASC
+      `,
+      [assignment.assignment_id, assignment.route_id, adminId, d]
+    );
+
+    routeClients = clientsRes.rows.map((row) => ({
+      ...row,
+      visited_at: row.visited_at ? new Date(row.visited_at).toISOString() : null,
+      deferred: false,
+      auto: false,
+    }));
+  }
+
+  // ── Cobros automáticos: todos los clientes del vendor con cuotas vencidas o de hoy ──
+  const autoRes = await query(
+    `SELECT
        c.id, c.name, c.phone, c.address,
-       rc.visit_order, lv.visited, lv.note, lv.visited_at
-
-     ORDER BY rc.visit_order ASC
-    `,
-    [assignment.assignment_id, assignment.route_id, adminId, d]
+       9999 AS visit_order,
+       false AS visited,
+       NULL AS visit_note,
+       NULL AS visited_at,
+       COALESCE(SUM(CASE WHEN i.due_date = $3::date THEN GREATEST(i.amount_due - i.amount_paid, 0) ELSE 0 END),0)::float8 AS due_today,
+       COALESCE(SUM(CASE WHEN i.due_date < $3::date  THEN GREATEST(i.amount_due - i.amount_paid, 0) ELSE 0 END),0)::float8 AS due_overdue,
+       COALESCE(SUM(CASE WHEN i.due_date <= $3::date THEN GREATEST(i.amount_due - i.amount_paid, 0) ELSE 0 END),0)::float8 AS due_total,
+       BOOL_OR(cr.payment_frequency = 'weekly') AS has_weekly_credits
+     FROM credits cr
+     JOIN clients c ON c.id = cr.client_id
+       AND c.admin_id = $1 AND c.deleted_at IS NULL
+     JOIN installments i ON i.credit_id = cr.id
+       AND i.status IN ('pending','late')
+       AND (i.amount_due - i.amount_paid) > 0
+       AND i.due_date <= $3::date
+     WHERE (cr.vendor_id = $2 OR c.vendor_id = $2)
+       AND cr.admin_id = $1
+       AND cr.deleted_at IS NULL
+       AND cr.status IN ('active','late')
+       AND cr.balance_amount > 0
+     GROUP BY c.id, c.name, c.phone, c.address
+     ORDER BY
+       MAX(CASE WHEN i.due_date < $3::date THEN 1 ELSE 0 END) DESC,
+       c.name ASC`,
+    [adminId, vendorId, d]
   );
 
-  const clients = clientsRes.rows.map((row) => ({
-    ...row,
-    visited_at: row.visited_at ? new Date(row.visited_at).toISOString() : null,
-  }));
+  // Mezclar: los de ruta manual tienen prioridad (mantienen estado de visita)
+  const routeIds = new Set(routeClients.map((c) => c.id));
+  const autoClients = autoRes.rows
+    .filter((c) => !routeIds.has(c.id))
+    .map((row) => ({
+      ...row,
+      visited_at: null,
+      deferred: false,
+      auto: true,
+    }));
 
-  const totals = clients.reduce(
+  let allClients = [...routeClients, ...autoClients];
+
+  // Clientes diferidos
+  const deferredRes = await query(
+    `SELECT
+       c.id, c.name, c.phone, c.address,
+       999999 AS visit_order,
+       false AS visited, NULL AS visit_note, NULL AS visited_at,
+       COALESCE(SUM(CASE WHEN i.due_date = $3::date THEN GREATEST(i.amount_due - i.amount_paid, 0) ELSE 0 END),0)::float8 AS due_today,
+       COALESCE(SUM(CASE WHEN i.due_date < $3::date  THEN GREATEST(i.amount_due - i.amount_paid, 0) ELSE 0 END),0)::float8 AS due_overdue,
+       COALESCE(SUM(CASE WHEN i.due_date <= $3::date THEN GREATEST(i.amount_due - i.amount_paid, 0) ELSE 0 END),0)::float8 AS due_total,
+       BOOL_OR(cr.payment_frequency = 'weekly') AS has_weekly_credits,
+       true AS deferred
+     FROM vendor_deferred_clients vdc
+     JOIN clients c ON c.id = vdc.client_id AND c.admin_id = $2 AND c.deleted_at IS NULL
+     LEFT JOIN credits cr
+       ON cr.client_id = c.id AND cr.admin_id = $2 AND cr.deleted_at IS NULL
+       AND cr.status IN ('active','late') AND cr.balance_amount > 0
+     LEFT JOIN installments i
+       ON i.credit_id = cr.id AND i.status IN ('pending','late')
+       AND (i.amount_due - i.amount_paid) > 0
+     WHERE vdc.vendor_id = $1 AND vdc.admin_id = $2
+       AND vdc.for_date = $3::date AND vdc.deleted_at IS NULL
+     GROUP BY c.id, c.name, c.phone, c.address`,
+    [vendorId, adminId, d]
+  );
+
+  const allIds = new Set(allClients.map((c) => c.id));
+  const deferred = deferredRes.rows
+    .filter((c) => !allIds.has(c.id))
+    .map((row) => ({ ...row, visited_at: null, auto: false }));
+
+  allClients = [...allClients, ...deferred];
+
+  const baseTotals = allClients.reduce(
     (acc, c) => {
-      acc.due_today += Number(c.due_today || 0);
+      acc.due_today   += Number(c.due_today   || 0);
       acc.due_overdue += Number(c.due_overdue || 0);
-      acc.due_total += Number(c.due_total || 0);
+      acc.due_total   += Number(c.due_total   || 0);
       return acc;
     },
     { due_today: 0, due_overdue: 0, due_total: 0 }
   );
 
-  return { assignment, totals, clients };
+  // ── Extra stats: payments, cash movements, per-client credit enrichment ──
+  const allClientIds = allClients.map((c) => c.id);
+
+  const [payStats, cashStats, creditRows, portfolioRow] = await Promise.all([
+    // Payment totals for today
+    query(
+      `SELECT
+         COALESCE(SUM(p.amount), 0)::float8 AS paid_today,
+         COUNT(p.id)::int AS paid_count,
+         COALESCE(SUM(CASE WHEN p.method = 'cash' THEN p.amount ELSE 0 END), 0)::float8 AS cash_collected,
+         COALESCE(SUM(CASE WHEN p.method IS DISTINCT FROM 'cash' AND p.method IS NOT NULL THEN p.amount ELSE 0 END), 0)::float8 AS transfer_collected
+       FROM payments p
+       WHERE p.admin_id = $1 AND p.vendor_id = $2
+         AND p.paid_at >= ($3::date)::timestamp
+         AND p.paid_at <  (($3::date + 1)::timestamp)`,
+      [adminId, vendorId, d]
+    ),
+    // Cash movements income / expenses
+    query(
+      `SELECT
+         COALESCE(SUM(CASE WHEN movement_type='income'  THEN amount ELSE 0 END), 0)::float8 AS income,
+         COALESCE(SUM(CASE WHEN movement_type='expense' THEN amount ELSE 0 END), 0)::float8 AS expenses
+       FROM vendor_cash_movements
+       WHERE admin_id = $1 AND vendor_id = $2
+         AND occurred_at::date = $3::date
+         AND deleted_at IS NULL`,
+      [adminId, vendorId, d]
+    ),
+    // Per-client: most relevant active credit + today's payment
+    allClientIds.length > 0
+      ? query(
+          `SELECT DISTINCT ON (cr.client_id)
+             cr.client_id,
+             cr.id AS credit_id,
+             cr.payment_frequency AS frequency,
+             cr.balance_amount::float8 AS credit_balance,
+             COALESCE(cr.total_amount, cr.principal_amount, 0)::float8 AS credit_total,
+             (
+               SELECT COUNT(*)::int FROM installments i2
+               WHERE i2.credit_id = cr.id AND i2.status IN ('pending','late')
+             ) AS remaining_installments,
+             pay.amount::float8 AS amount_paid,
+             pay.method AS payment_method,
+             pay.paid_at,
+             (pay.id IS NULL) AS no_payment
+           FROM credits cr
+           LEFT JOIN LATERAL (
+             SELECT id, amount, method, paid_at
+             FROM payments pp
+             WHERE pp.credit_id = cr.id
+               AND pp.paid_at >= ($3::date)::timestamp
+               AND pp.paid_at <  (($3::date + 1)::timestamp)
+             ORDER BY pp.paid_at DESC LIMIT 1
+           ) pay ON true
+           WHERE cr.admin_id = $1
+             AND cr.client_id = ANY($2::uuid[])
+             AND cr.deleted_at IS NULL
+             AND cr.status IN ('active','late')
+           ORDER BY cr.client_id, pay.paid_at DESC NULLS LAST, cr.created_at DESC`,
+          [adminId, allClientIds, d]
+        )
+      : Promise.resolve({ rows: [] }),
+    // Vendor portfolio total (initial portfolio)
+    query(
+      `SELECT COALESCE(SUM(cr.balance_amount), 0)::float8 AS initial_portfolio
+       FROM credits cr
+       JOIN clients c ON c.id = cr.client_id
+       WHERE cr.admin_id = $1
+         AND (cr.vendor_id = $2 OR c.vendor_id = $2)
+         AND cr.deleted_at IS NULL
+         AND cr.status IN ('active','late')`,
+      [adminId, vendorId]
+    ),
+  ]);
+
+  // Build lookup map: client_id → credit+payment info
+  const creditMap = {};
+  for (const row of creditRows.rows) {
+    creditMap[row.client_id] = row;
+  }
+
+  // Enrich each client with credit and payment data
+  const enrichedClients = allClients.map((c) => {
+    const cr = creditMap[c.id] || {};
+    return {
+      ...c,
+      credit_id:              cr.credit_id              || null,
+      consecutivo:            cr.credit_id              || c.id,
+      frequency:              cr.frequency              || null,
+      credit_balance:         cr.credit_balance         ?? null,
+      credit_total:           cr.credit_total           ?? null,
+      remaining_installments: cr.remaining_installments ?? null,
+      amount_paid:            cr.amount_paid            ?? null,
+      payment_method:         cr.payment_method         || null,
+      paid_at:                cr.paid_at ? new Date(cr.paid_at).toISOString() : null,
+      no_payment:             !cr.credit_id ? true : !!cr.no_payment,
+    };
+  });
+
+  const ps = payStats.rows[0]    || {};
+  const cs = cashStats.rows[0]   || {};
+  const pr = portfolioRow.rows[0] || {};
+
+  const paidCount   = parseInt(ps.paid_count) || 0;
+  const noPaidCount = Math.max(0, allClients.length - paidCount);
+
+  const enrichedTotals = {
+    ...baseTotals,
+    paid_today:        Number(ps.paid_today)        || 0,
+    paid_count:        paidCount,
+    no_paid_count:     noPaidCount,
+    cash_collected:    Number(ps.cash_collected)    || 0,
+    transfer_collected:Number(ps.transfer_collected)|| 0,
+  };
+
+  const startTime = assignment?.created_at ? new Date(assignment.created_at).toISOString() : null;
+  const closeTime = assignment?.status === 'completed' && assignment?.updated_at
+    ? new Date(assignment.updated_at).toISOString()
+    : null;
+
+  const initialPortfolio = Number(pr.initial_portfolio) || 0;
+
+  return {
+    assignment,
+    totals:   enrichedTotals,
+    clients:  enrichedClients,
+    // LiqDiaria root fields
+    start_time:        startTime,
+    close_time:        closeTime,
+    total_clients:     allClients.length,
+    initial_clients:   allClients.length,
+    synced_clients:    allClients.length,
+    initial_portfolio: initialPortfolio,
+    income:            Number(cs.income)   || 0,
+    expenses:          Number(cs.expenses) || 0,
+    withdrawals:       0,
+    // Placeholder fields (require additional schema tracking)
+    new_clients:       0,
+    renewed_clients:   0,
+    deferred_next_day: 0,
+    cancelled_clients: 0,
+    initial_cash:      0,
+    final_cash:        0,
+    final_portfolio:   initialPortfolio,
+    sales:             0,
+    sales_interest:    0,
+    penalty:           0,
+  };
 }
 
 async function createRouteVisit(adminId, vendorId, payload) {
   const { route_assignment_id, client_id, visited, note } = payload;
 
-  const ra = await query(
-    `SELECT id, admin_id, vendor_id, deleted_at
-     FROM route_assignments
-     WHERE id = $1`,
-    [route_assignment_id]
-  );
-  const row = ra.rows[0];
-  if (!row || row.deleted_at) throw new AppError(404, "NOT_FOUND", "Ruta no encontrada");
-  if (row.admin_id !== adminId) throw new AppError(403, "FORBIDDEN", "Ruta no pertenece a tu admin");
-  if (row.vendor_id !== vendorId) throw new AppError(403, "FORBIDDEN", "No asignado a este vendor");
+  if (route_assignment_id) {
+    // Visita de ruta manual — validar asignación y persistir
+    const ra = await query(
+      `SELECT id, admin_id, vendor_id, deleted_at
+       FROM route_assignments
+       WHERE id = $1`,
+      [route_assignment_id]
+    );
+    const row = ra.rows[0];
+    if (!row || row.deleted_at) throw new AppError(404, "NOT_FOUND", "Ruta no encontrada");
+    if (row.admin_id !== adminId) throw new AppError(403, "FORBIDDEN", "Ruta no pertenece a tu admin");
+    if (row.vendor_id !== vendorId) throw new AppError(403, "FORBIDDEN", "No asignado a este vendor");
 
-  const ins = await query(
-    `INSERT INTO route_visits (admin_id, route_assignment_id, client_id, visited, note)
-     VALUES ($1,$2,$3,$4,$5)
-     RETURNING id, route_assignment_id, client_id, visited, note, visited_at`,
-    [adminId, route_assignment_id, client_id, visited === true, note || null]
-  );
+    const ins = await query(
+      `INSERT INTO route_visits (admin_id, route_assignment_id, client_id, visited, note)
+       VALUES ($1,$2,$3,$4,$5)
+       ON CONFLICT (route_assignment_id, client_id)
+       DO UPDATE SET visited=$4, note=$5, visited_at=now()
+       RETURNING id, route_assignment_id, client_id, visited, note, visited_at`,
+      [adminId, route_assignment_id, client_id, visited === true, note || null]
+    );
+    return ins.rows[0];
+  }
 
-  return ins.rows[0];
+  // Visita automática (sin ruta asignada) — solo confirmar, no persiste en route_visits
+  return { route_assignment_id: null, client_id, visited: visited === true, note: note || null, visited_at: new Date().toISOString() };
 }
 
 module.exports = {
