@@ -95,8 +95,30 @@ async function getLocationHistory({ adminId }, adminIdParam, vendorIdParam, { da
   return { items: itemsRes.rows, total: totalRes.rows[0]?.total || 0 };
 }
 
+async function getAllVendorsLatestLocations({ adminId }, adminIdParam) {
+  if (adminId !== adminIdParam) throw new AppError(403, "FORBIDDEN", "No puedes acceder a otro admin");
+
+  const r = await query(
+    `SELECT DISTINCT ON (vl.vendor_id)
+       vl.id, vl.admin_id, vl.vendor_id,
+       vl.lat, vl.lng,
+       vl.accuracy_m, vl.battery_level, vl.is_mock, vl.source,
+       vl.recorded_at, vl.created_at,
+       v.name AS vendor_name,
+       v.status AS vendor_status
+     FROM vendor_locations vl
+     JOIN vendors v ON v.id = vl.vendor_id AND v.deleted_at IS NULL
+     WHERE vl.admin_id = $1
+     ORDER BY vl.vendor_id, vl.recorded_at DESC, vl.created_at DESC`,
+    [adminId]
+  );
+
+  return r.rows;
+}
+
 module.exports = {
   postVendorLocation,
   getLatestLocation,
-  getLocationHistory
+  getLocationHistory,
+  getAllVendorsLatestLocations
 };

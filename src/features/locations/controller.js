@@ -39,4 +39,13 @@ async function history(req, res) {
   return ok(res, result.items, { total: result.total, date, limit, offset });
 }
 
-module.exports = { postLocation, latest, history };
+async function allLatest(req, res) {
+  const { adminId } = req.params;
+  const rows = await service.getAllVendorsLatestLocations(
+    { adminId: req.auth.adminId },
+    adminId
+  );
+  return ok(res, rows);
+}
+
+module.exports = { postLocation, latest, allLatest, history };

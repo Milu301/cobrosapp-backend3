@@ -20,6 +20,16 @@ locationRoutes.post(
 );
 
 /**
+ * Admin reads ALL vendors latest locations
+ * GET /admins/:adminId/vendors/locations/latest
+ */
+locationRoutes.get(
+  "/admins/:adminId/vendors/locations/latest",
+  roleGuard("admin"),
+  asyncHandler(controller.allLatest)
+);
+
+/**
  * Admin reads vendor location
  * GET /admins/:adminId/vendors/:vendorId/location/latest
  * GET /admins/:adminId/vendors/:vendorId/location/history?date=YYYY-MM-DD&limit=500&offset=0

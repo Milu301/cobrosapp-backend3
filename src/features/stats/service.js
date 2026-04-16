@@ -49,11 +49,21 @@ async function getAdminStats(adminId) {
       `SELECT
          COALESCE(SUM(CASE WHEN movement_type='income'  THEN amount ELSE 0 END),0)::float8 AS today_income,
          COALESCE(SUM(CASE WHEN movement_type='expense' THEN amount ELSE 0 END),0)::float8 AS today_expense
-       FROM admin_cash_movements
-       WHERE admin_id = $1
-         AND deleted_at IS NULL
-         AND occurred_at >= ($2::date::timestamp AT TIME ZONE $3)
-         AND occurred_at <  (($2::date + 1)::timestamp AT TIME ZONE $3)`,
+       FROM (
+         SELECT movement_type, amount
+         FROM admin_cash_movements
+         WHERE admin_id = $1
+           AND deleted_at IS NULL
+           AND occurred_at >= ($2::date::timestamp AT TIME ZONE $3)
+           AND occurred_at <  (($2::date + 1)::timestamp AT TIME ZONE $3)
+         UNION ALL
+         SELECT movement_type, amount
+         FROM vendor_cash_movements
+         WHERE admin_id = $1
+           AND deleted_at IS NULL
+           AND occurred_at >= ($2::date::timestamp AT TIME ZONE $3)
+           AND occurred_at <  (($2::date + 1)::timestamp AT TIME ZONE $3)
+       ) AS combined_cash`,
       [adminId, today, APP_TZ]
     ),
     // Sum of all vendor payments received today

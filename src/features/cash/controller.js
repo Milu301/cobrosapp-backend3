@@ -105,6 +105,37 @@ async function adminCashSummary(req, res) {
   return ok(res, result);
 }
 
+async function listAllCash(req, res) {
+  const adminIdParam = getParam(req, "adminId") || req?.auth?.adminId;
+  const dateStr = req?.query?.date;
+
+  if (!adminIdParam) throw new AppError(400, "VALIDATION_ERROR", "adminId requerido");
+  if (!dateStr) throw new AppError(400, "VALIDATION_ERROR", "date requerido");
+
+  const result = await cashService.listAllCash(
+    { role: req?.auth?.role, adminId: req?.auth?.adminId },
+    adminIdParam,
+    dateStr,
+    req.query
+  );
+  return ok(res, result);
+}
+
+async function allCashSummary(req, res) {
+  const adminIdParam = getParam(req, "adminId") || req?.auth?.adminId;
+  const dateStr = req?.query?.date;
+
+  if (!adminIdParam) throw new AppError(400, "VALIDATION_ERROR", "adminId requerido");
+  if (!dateStr) throw new AppError(400, "VALIDATION_ERROR", "date requerido");
+
+  const result = await cashService.allCashSummary(
+    { role: req?.auth?.role, adminId: req?.auth?.adminId },
+    adminIdParam,
+    dateStr
+  );
+  return ok(res, result);
+}
+
 async function summary(req, res) {
   const role = req?.auth?.role;
   const dateStr = req?.query?.date;
@@ -139,6 +170,8 @@ module.exports = {
   adminCashList,
   adminCashCreate,
   adminCashSummary,
+  listAllCash,
+  allCashSummary,
   summary,
   listVendorCash,
   createVendorCashMovement,

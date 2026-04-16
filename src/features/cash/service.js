@@ -249,6 +249,101 @@ async function createAdminCashMovement(auth, adminIdParam, payload) {
   return r.rows[0];
 }
 
+async function listAllCash(auth, adminIdParam, optsOrDate, maybeQuery) {
+  await assertAdminOwnsAdmin(auth.adminId, adminIdParam);
+
+  const { date, limit, offset } = normalizeListArgs(optsOrDate, maybeQuery);
+  assertDateYYYYMMDD(date);
+
+  const limitN = clampInt(limit, { min: 1, max: 200, fallback: 100 });
+  const offsetN = clampInt(offset, { min: 0, max: 1_000_000, fallback: 0 });
+
+  const itemsRes = await query(
+    `SELECT
+       'admin' AS source,
+       am.id,
+       am.admin_id,
+       NULL::text AS vendor_id,
+       NULL AS vendor_name,
+       am.movement_type,
+       am.category,
+       am.amount::float8 AS amount,
+       am.occurred_at,
+       am.reference_type,
+       am.reference_id,
+       am.note,
+       am.created_at
+     FROM admin_cash_movements am
+     WHERE am.admin_id = $1
+       AND am.deleted_at IS NULL
+       AND ${dayWindowSql("am.occurred_at", 2, 3)}
+     UNION ALL
+     SELECT
+       'vendor' AS source,
+       vm.id,
+       vm.admin_id,
+       vm.vendor_id::text,
+       v.name AS vendor_name,
+       vm.movement_type,
+       vm.category,
+       vm.amount::float8 AS amount,
+       vm.occurred_at,
+       vm.reference_type,
+       vm.reference_id,
+       vm.note,
+       vm.created_at
+     FROM vendor_cash_movements vm
+     JOIN vendors v ON v.id = vm.vendor_id
+     WHERE vm.admin_id = $1
+       AND vm.deleted_at IS NULL
+       AND ${dayWindowSql("vm.occurred_at", 2, 3)}
+     ORDER BY occurred_at DESC, created_at DESC
+     LIMIT $4 OFFSET $5`,
+    [adminIdParam, date, APP_TZ, limitN, offsetN]
+  );
+
+  const totalRes = await query(
+    `SELECT (
+       SELECT COUNT(*) FROM admin_cash_movements
+       WHERE admin_id = $1 AND deleted_at IS NULL AND ${dayWindowSql("occurred_at", 2, 3)}
+     ) + (
+       SELECT COUNT(*) FROM vendor_cash_movements
+       WHERE admin_id = $1 AND deleted_at IS NULL AND ${dayWindowSql("occurred_at", 2, 3)}
+     ) AS total`,
+    [adminIdParam, date, APP_TZ]
+  );
+
+  return { items: itemsRes.rows, total: parseInt(totalRes.rows[0]?.total) || 0 };
+}
+
+async function allCashSummary(auth, adminIdParam, optsOrDate) {
+  await assertAdminOwnsAdmin(auth.adminId, adminIdParam);
+
+  const { date } = normalizeSummaryArgs(optsOrDate);
+  assertDateYYYYMMDD(date);
+
+  const r = await query(
+    `SELECT
+       COALESCE(SUM(CASE WHEN movement_type='income'  THEN amount ELSE 0 END),0)::float8 AS income,
+       COALESCE(SUM(CASE WHEN movement_type='expense' THEN amount ELSE 0 END),0)::float8 AS expense
+     FROM (
+       SELECT movement_type, amount
+       FROM admin_cash_movements
+       WHERE admin_id = $1 AND deleted_at IS NULL AND ${dayWindowSql("occurred_at", 2, 3)}
+       UNION ALL
+       SELECT movement_type, amount
+       FROM vendor_cash_movements
+       WHERE admin_id = $1 AND deleted_at IS NULL AND ${dayWindowSql("occurred_at", 2, 3)}
+     ) AS combined`,
+    [adminIdParam, date, APP_TZ]
+  );
+
+  const income = Number(r.rows[0]?.income || 0);
+  const expense = Number(r.rows[0]?.expense || 0);
+
+  return { income, expense, net: income - expense, tz: APP_TZ };
+}
+
 const vendorCashList = listVendorCash;
 const adminCashList = listAdminCash;
 const vendorCashCreate = createVendorCashMovement;
@@ -261,6 +356,8 @@ module.exports = {
   listAdminCash,
   adminCashSummary,
   createAdminCashMovement,
+  listAllCash,
+  allCashSummary,
   vendorCashList,
   adminCashList,
   vendorCashCreate,

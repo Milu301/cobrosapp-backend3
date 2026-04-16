@@ -40,6 +40,20 @@ cashRoutes.get(
 );
 
 cashRoutes.get(
+  "/admins/:adminId/cash/all",
+  roleGuard("admin"),
+  validate({ query: schema.cashListQuerySchema }),
+  asyncHandler(safeHandler("listAllCash"))
+);
+
+cashRoutes.get(
+  "/admins/:adminId/cash/all/summary",
+  roleGuard("admin"),
+  validate({ query: schema.cashSummaryQuerySchema }),
+  asyncHandler(safeHandler("allCashSummary"))
+);
+
+cashRoutes.get(
   "/admins/:adminId/cash",
   roleGuard("admin"),
   validate({ query: schema.cashListQuerySchema }),
