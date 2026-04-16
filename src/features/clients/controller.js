@@ -101,4 +101,14 @@ async function remove(req, res) {
   return ok(res, deleted);
 }
 
-module.exports = { adminList, vendorList, getOne, adminCreate, vendorCreate, update, remove };
+async function hardRemove(req, res) {
+  if (req.auth.role !== "admin") throw new AppError(403, "FORBIDDEN", "Solo admins pueden borrar permanentemente");
+  const clientId = req.params.clientId;
+  const client = await service.getClientById(clientId);
+  if (client && client.admin_id !== req.auth.adminId) throw new AppError(403, "FORBIDDEN", "Cliente no pertenece a tu admin");
+
+  const result = await service.hardDeleteClient(clientId, req.auth.adminId);
+  return ok(res, result);
+}
+
+module.exports = { adminList, vendorList, getOne, adminCreate, vendorCreate, update, remove, hardRemove };

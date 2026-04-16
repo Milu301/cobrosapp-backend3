@@ -218,6 +218,49 @@ async function softDeleteClient(clientId, adminId) {
   return r.rows[0] || null;
 }
 
+async function hardDeleteClient(clientId, adminId) {
+  const { pool } = require("../../db/pool");
+  const db = await pool.connect();
+  try {
+    await db.query("BEGIN");
+
+    // Verify ownership
+    const check = await db.query(
+      `SELECT id FROM clients WHERE id=$1 AND admin_id=$2 LIMIT 1`,
+      [clientId, adminId]
+    );
+    if (!check.rows[0]) throw new AppError(404, "NOT_FOUND", "Cliente no encontrado");
+
+    // Delete dependent records in order
+    await db.query(`DELETE FROM route_visits  WHERE client_id=$1`, [clientId]);
+    await db.query(`DELETE FROM route_clients WHERE client_id=$1`, [clientId]);
+    await db.query(
+      `DELETE FROM payments WHERE credit_id IN (SELECT id FROM credits WHERE client_id=$1)`,
+      [clientId]
+    );
+    await db.query(
+      `DELETE FROM installments WHERE credit_id IN (SELECT id FROM credits WHERE client_id=$1)`,
+      [clientId]
+    );
+    await db.query(
+      `DELETE FROM vendor_cash_movements WHERE reference_type='payment' AND reference_id IN (
+         SELECT p.id FROM payments p JOIN credits c ON c.id=p.credit_id WHERE c.client_id=$1
+       )`,
+      [clientId]
+    );
+    await db.query(`DELETE FROM credits WHERE client_id=$1`, [clientId]);
+    await db.query(`DELETE FROM clients WHERE id=$1 AND admin_id=$2`, [clientId, adminId]);
+
+    await db.query("COMMIT");
+    return { id: clientId, deleted: true };
+  } catch (err) {
+    await db.query("ROLLBACK");
+    throw err;
+  } finally {
+    db.release();
+  }
+}
+
 module.exports = {
   permTrue,
   getVendorById,
@@ -231,4 +274,5 @@ module.exports = {
   createClient,
   updateClient,
   softDeleteClient,
+  hardDeleteClient,
 };

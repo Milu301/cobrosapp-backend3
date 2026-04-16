@@ -60,4 +60,6 @@ clientRoutes.put(
 
 clientRoutes.delete("/clients/:clientId", roleGuard("admin", "vendor"), asyncHandler(controller.remove));
 
+clientRoutes.delete("/admins/:adminId/clients/:clientId/hard", roleGuard("admin"), asyncHandler(controller.hardRemove));
+
 module.exports = { clientRoutes };
